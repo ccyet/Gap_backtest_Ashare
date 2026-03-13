@@ -172,11 +172,11 @@ with st.expander("数据格式说明（建议先看）", expanded=False):
         - 如果列名不是下面示例，也可以在页面里通过“字段映射”手动指定。
         """
     )
-    st.dataframe(build_data_format_table(), width="stretch", hide_index=True)
+    st.dataframe(build_data_format_table(), use_container_width=True, hide_index=True)
     st.caption("推荐日期格式：`2026-03-13`、`20260313`、Excel 日期单元格。")
     st.caption("系统也会尽量自动识别常见中文列名，如“交易日期、股票代码、开盘价、最高价、最低价、收盘价、成交量”。")
     st.markdown("示例数据：")
-    st.dataframe(build_sample_input_data(), width="stretch", hide_index=True)
+    st.dataframe(build_sample_input_data(), use_container_width=True, hide_index=True)
     st.download_button(
         "下载 Excel 模板",
         data=build_template_bytes(),
@@ -271,7 +271,7 @@ with st.container(border=True):
             with map_col_3:
                 volume_column = st.text_input("成交量列名", value="")
 
-        submitted = st.form_submit_button("开始统计", width="stretch")
+        submitted = st.form_submit_button("开始统计", use_container_width=True)
 
     if use_ma_filter:
         if direction_label == "向上跳空":
@@ -320,7 +320,7 @@ with st.container(border=True):
 
 if not table_overview_df.empty:
     with st.expander("数据库表结构预览"):
-        st.dataframe(table_overview_df, width="stretch", hide_index=True)
+        st.dataframe(table_overview_df, use_container_width=True, hide_index=True)
 
 if file_preview:
     with st.expander("文件结构预览"):
@@ -334,7 +334,7 @@ if file_preview:
                 "字段预览": file_preview.get("columns_preview", ""),
             }
         ]
-        st.dataframe(pd.DataFrame(preview_rows), width="stretch", hide_index=True)
+        st.dataframe(pd.DataFrame(preview_rows), use_container_width=True, hide_index=True)
         if file_preview.get("sheet_names"):
             st.caption("可用工作表：" + "、".join(file_preview["sheet_names"]))
         detected_fields = str(file_preview.get("detected_fields", "")).strip()
@@ -464,10 +464,10 @@ if isinstance(detail_df, pd.DataFrame) and "excel_bytes" in st.session_state:
         chart_df = equity_df.copy()
         chart_df["date"] = pd.to_datetime(chart_df["date"])
         st.line_chart(chart_df.set_index("date")[["net_value"]], height=320)
-        st.dataframe(format_equity_for_display(equity_df), width="stretch", hide_index=True)
+        st.dataframe(format_equity_for_display(equity_df), use_container_width=True, hide_index=True)
 
     st.subheader("每日统计结果（按实际执行交易的买入日汇总）")
-    st.dataframe(format_summary_for_display(daily_df), width="stretch", hide_index=True)
+    st.dataframe(format_summary_for_display(daily_df), use_container_width=True, hide_index=True)
 
     st.subheader("交易明细结果（按账户顺序执行）")
-    st.dataframe(format_detail_for_display(detail_df), width="stretch", hide_index=True)
+    st.dataframe(format_detail_for_display(detail_df), use_container_width=True, hide_index=True)
