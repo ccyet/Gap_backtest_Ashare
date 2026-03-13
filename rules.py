@@ -100,6 +100,9 @@ def simulate_trade(
         actual_sell_value = sell_price * (1.0 - params.sell_cost_ratio)
         gross_return = sell_price / buy_price - 1.0
         net_return = actual_sell_value / actual_buy_cost - 1.0
+        holding_slice = stock_df.iloc[signal_idx + 1 : signal_idx + holding_days + 1]
+        mfe = holding_slice["high"].max() / buy_price - 1.0
+        mae = holding_slice["low"].min() / buy_price - 1.0
 
         return {
             "date": buy_date.date(),
@@ -119,6 +122,8 @@ def simulate_trade(
             "gross_return_pct": gross_return * 100.0,
             "net_return_pct": net_return * 100.0,
             "win_flag": 1 if net_return > 0 else 0,
+            "mfe_pct": float(mfe) * 100.0,
+            "mae_pct": float(mae) * 100.0,
         }, None
 
     return None, "no_exit"

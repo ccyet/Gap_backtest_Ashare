@@ -26,6 +26,8 @@ BASE_DETAIL_COLUMNS = [
     "gross_return_pct",
     "net_return_pct",
     "win_flag",
+    "mfe_pct",
+    "mae_pct",
 ]
 
 DETAIL_COLUMNS = BASE_DETAIL_COLUMNS + [
@@ -76,6 +78,9 @@ def _empty_strategy_stats() -> dict[str, float]:
         "total_return_pct": 0.0,
         "max_drawdown_pct": 0.0,
         "avg_holding_days": 0.0,
+        "avg_mfe_pct": 0.0,
+        "avg_mae_pct": 0.0,
+        "profit_risk_ratio": 0.0,
     }
 
 
@@ -163,6 +168,12 @@ def build_strategy_trades(candidate_df: pd.DataFrame) -> tuple[pd.DataFrame, dic
     stats["final_net_value"] = float(strategy_df["nav_after_trade"].iloc[-1])
     stats["total_return_pct"] = (stats["final_net_value"] - 1.0) * 100.0
     stats["avg_holding_days"] = float(strategy_df["holding_days"].mean())
+    stats["avg_mfe_pct"] = float(strategy_df["mfe_pct"].mean())
+    stats["avg_mae_pct"] = float(strategy_df["mae_pct"].mean())
+    if stats["avg_mae_pct"] == 0:
+        stats["profit_risk_ratio"] = 0.0
+    else:
+        stats["profit_risk_ratio"] = stats["avg_mfe_pct"] / abs(stats["avg_mae_pct"])
 
     return strategy_df, {**_empty_strategy_stats(), **dict(stats)}
 
