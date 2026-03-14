@@ -81,6 +81,7 @@ def _empty_strategy_stats() -> dict[str, float]:
         "avg_mfe_pct": 0.0,
         "avg_mae_pct": 0.0,
         "profit_risk_ratio": 0.0,
+        "trade_return_volatility_pct": 0.0,
     }
 
 
@@ -174,6 +175,7 @@ def build_strategy_trades(candidate_df: pd.DataFrame) -> tuple[pd.DataFrame, dic
         stats["profit_risk_ratio"] = 0.0
     else:
         stats["profit_risk_ratio"] = stats["avg_mfe_pct"] / abs(stats["avg_mae_pct"])
+    stats["trade_return_volatility_pct"] = float(strategy_df["net_return_pct"].std(ddof=0))
 
     return strategy_df, {**_empty_strategy_stats(), **dict(stats)}
 

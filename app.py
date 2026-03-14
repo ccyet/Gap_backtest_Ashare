@@ -432,12 +432,13 @@ if isinstance(detail_df, pd.DataFrame) and "excel_bytes" in st.session_state:
     if detail_df.empty:
         st.info("本次分析没有生成完整交易结果。请检查参数设置，或确认数据库里有足够的未来交易日数据。")
     else:
-        metric_1, metric_2, metric_3, metric_4, metric_5 = st.columns(5)
+        metric_1, metric_2, metric_3, metric_4, metric_5, metric_6 = st.columns(6)
         metric_1.metric("闭环交易数", f"{int(stats.get('executed_trades', len(detail_df)))}")
         metric_2.metric("最终净值", f"{float(stats.get('final_net_value', 1.0)):.4f}")
         metric_3.metric("累计收益", f"{float(stats.get('total_return_pct', 0.0)):.2f}%")
         metric_4.metric("闭环胜率", f"{float(stats.get('strategy_win_rate_pct', 0.0)):.2f}%")
-        metric_5.metric("最大回撤", f"{float(stats.get('max_drawdown_pct', 0.0)):.2f}%")
+        metric_5.metric("收益波动率", f"{float(stats.get('trade_return_volatility_pct', 0.0)):.2f}%")
+        metric_6.metric("最大回撤", f"{float(stats.get('max_drawdown_pct', 0.0)):.2f}%")
 
     if stats:
         st.caption(
@@ -456,7 +457,6 @@ if isinstance(detail_df, pd.DataFrame) and "excel_bytes" in st.session_state:
         data=st.session_state["excel_bytes"],
         file_name=st.session_state["download_name"],
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        width="content",
     )
 
     if isinstance(equity_df, pd.DataFrame) and not equity_df.empty:
@@ -464,6 +464,12 @@ if isinstance(detail_df, pd.DataFrame) and "excel_bytes" in st.session_state:
         chart_df = equity_df.copy()
         chart_df["date"] = pd.to_datetime(chart_df["date"])
         st.line_chart(chart_df.set_index("date")[["net_value"]], height=320)
+
+        st.subheader("回撤曲线")
+        dd_df = equity_df.copy()
+        dd_df["date"] = pd.to_datetime(dd_df["date"])
+        st.line_chart(dd_df.set_index("date")[["drawdown_pct"]], height=220)
+
         st.dataframe(format_equity_for_display(equity_df), use_container_width=True, hide_index=True)
 
     st.subheader("每日统计结果（按实际执行交易的买入日汇总）")
