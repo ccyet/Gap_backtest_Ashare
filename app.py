@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from io import BytesIO
+import inspect
 from pathlib import Path
 
 import pandas as pd
@@ -32,17 +33,19 @@ RESULT_STATE_KEYS = ("detail_df", "daily_df", "equity_df", "stats", "excel_bytes
 
 
 def dataframe_stretch(data: object, *, hide_index: bool = False) -> None:
-    try:
-        st.dataframe(data, width="stretch", hide_index=hide_index)
-    except TypeError:
-        st.dataframe(data, use_container_width=True, hide_index=hide_index)
+    params = inspect.signature(st.dataframe).parameters
+    kwargs: dict[str, object] = {"hide_index": hide_index}
+    if "use_container_width" in params:
+        kwargs["use_container_width"] = True
+    st.dataframe(data, **kwargs)
 
 
 def form_submit_button_stretch(label: str) -> bool:
-    try:
-        return st.form_submit_button(label, width="stretch")
-    except TypeError:
-        return st.form_submit_button(label, use_container_width=True)
+    params = inspect.signature(st.form_submit_button).parameters
+    kwargs: dict[str, object] = {}
+    if "use_container_width" in params:
+        kwargs["use_container_width"] = True
+    return st.form_submit_button(label, **kwargs)
 
 
 def clear_result_state() -> None:
