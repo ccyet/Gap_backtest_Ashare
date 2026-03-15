@@ -28,6 +28,7 @@ class AnalysisParams:
     profit_drawdown_pct: float
     enable_ma_exit: bool
     exit_ma_period: int
+    ma_exit_batches: int
     buy_cost_pct: float
     sell_cost_pct: float
     time_exit_mode: str
@@ -128,6 +129,9 @@ def validate_params(params: AnalysisParams) -> tuple[list[str], list[str]]:
 
     if params.enable_ma_exit and params.exit_ma_period < 1:
         errors.append("止盈参考均线周期必须大于等于 1。")
+
+    if params.enable_ma_exit and not (2 <= params.ma_exit_batches <= 3):
+        errors.append("均线离场分批数必须在 2 到 3 之间。")
 
     if params.buy_cost_pct < 0 or params.sell_cost_pct < 0:
         errors.append("买入成本和卖出成本都不能为负数。")

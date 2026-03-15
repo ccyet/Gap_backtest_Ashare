@@ -292,6 +292,15 @@ with st.container(border=True):
                 disabled=not enable_ma_exit,
                 help="用于让盈利单继续持有，等趋势转弱再退出。",
             )
+            ma_exit_batches = st.number_input(
+                "均线离场分几批卖出",
+                min_value=2,
+                max_value=3,
+                value=2,
+                step=1,
+                disabled=not enable_ma_exit,
+                help="预设 2 批，最多 3 批。触发均线离场时按批次逐步卖出。",
+            )
 
             buy_cost_pct = st.number_input("买入成本（%）", min_value=0.0, value=0.03, step=0.01, format="%.4f")
             sell_cost_pct = st.number_input("卖出成本（%）", min_value=0.0, value=0.13, step=0.01, format="%.4f")
@@ -412,6 +421,7 @@ if submitted:
         profit_drawdown_pct=float(profit_drawdown_pct),
         enable_ma_exit=bool(enable_ma_exit),
         exit_ma_period=int(exit_ma_period),
+        ma_exit_batches=int(ma_exit_batches),
         buy_cost_pct=float(buy_cost_pct),
         sell_cost_pct=float(sell_cost_pct),
         time_exit_mode="strict" if time_exit_mode_label == "按原规则剔除未达条件信号" else "force_close",

@@ -76,6 +76,13 @@ def simulate_trade(
         stock_df["close"].rolling(params.exit_ma_period).mean() if params.enable_ma_exit else pd.Series(math.nan, index=stock_df.index)
     )
 
+    # 均线离场分批：默认 2 批，最多 3 批。
+    planned_ma_batches = max(2, min(int(params.ma_exit_batches), 3)) if params.enable_ma_exit else 1
+    ma_batch_weight = 1.0 / planned_ma_batches
+    remaining_weight = 1.0
+    accumulated_sell_value = 0.0
+    ma_batches_executed = 0
+
     sell_price: float | None = None
     exit_type: str | None = None
     sell_day_idx: int | None = None
@@ -84,8 +91,11 @@ def simulate_trade(
     triggered_exit_ma_value = math.nan
 
     max_profit_pct = 0.0
+    time_exit_checked = False
 
-    for holding_days in range(1, params.time_stop_days + 1):
+    max_holding_days = len(stock_df) - signal_idx - 1
+
+    for holding_days in range(1, max_holding_days + 1):
         day_idx = signal_idx + holding_days
         day_row = stock_df.iloc[day_idx]
         day_date = pd.Timestamp(day_row["date"])
@@ -112,27 +122,31 @@ def simulate_trade(
                     exit_type = "profit_drawdown_exit"
                     triggered_profit_drawdown_ratio = float(profit_drawdown_ratio)
 
-            # 5) 均线趋势离场（可选）
+            # 5) 均线趋势离场（可选，支持分批）
             if sell_price is None and params.enable_ma_exit:
                 day_exit_ma = exit_ma_series.iloc[day_idx]
                 if pd.notna(day_exit_ma):
                     day_exit_ma_value = float(day_exit_ma)
+                    triggered_exit_ma_value = day_exit_ma_value
                     if day_close < day_exit_ma_value:
-                        sell_price = day_close
-                        exit_type = "ma_exit"
-                        triggered_exit_ma_value = day_exit_ma_value
+                        if remaining_weight > ma_batch_weight:
+                            # 先卖出一批，剩余仓位继续由后续规则管理。
+                            accumulated_sell_value += day_close * ma_batch_weight
+                            remaining_weight -= ma_batch_weight
+                            ma_batches_executed += 1
+                        else:
+                            # 最后一批卖出，交易闭环。
+                            sell_price = day_close
+                            exit_type = "ma_exit"
+                            ma_batches_executed += 1
 
-            # 6) 时间退出
-            if sell_price is None and holding_days == params.time_stop_days:
+            # 6) 时间退出：仅在第 N 天检查一次，未达目标才退出；达标则继续由其他机制管理
+            if sell_price is None and not time_exit_checked and holding_days >= params.time_stop_days:
+                time_exit_checked = True
                 holding_return_at_n = day_close / buy_price - 1.0
                 if holding_return_at_n < params.time_stop_target_ratio:
                     sell_price = day_close
                     exit_type = "time_exit"
-                elif params.time_exit_mode == "force_close":
-                    sell_price = day_close
-                    exit_type = "time_exit"
-                else:
-                    return None, "time_target_met"
 
         if sell_price is not None and exit_type is not None:
             sell_day_idx = day_idx
@@ -146,9 +160,13 @@ def simulate_trade(
     if sell_price is None or exit_type is None or sell_day_idx is None or sell_date is None:
         return None, "no_exit"
 
+    # 合并分批与最终卖出，得到整笔交易等效卖出价。
+    final_weight = remaining_weight
+    weighted_sell_price = (accumulated_sell_value + final_weight * sell_price) / 1.0
+
     actual_buy_cost = buy_price * (1.0 + params.buy_cost_ratio)
-    actual_sell_value = sell_price * (1.0 - params.sell_cost_ratio)
-    gross_return = sell_price / buy_price - 1.0
+    actual_sell_value = weighted_sell_price * (1.0 - params.sell_cost_ratio)
+    gross_return = weighted_sell_price / buy_price - 1.0
     net_return = actual_sell_value / actual_buy_cost - 1.0
     holding_slice = stock_df.iloc[signal_idx + 1 : sell_day_idx + 1]
     mfe = holding_slice["high"].max() / buy_price - 1.0
@@ -165,7 +183,7 @@ def simulate_trade(
         "volume": float(signal_row["volume"]) if pd.notna(signal_row["volume"]) else math.nan,
         "gap_pct_vs_prev_close": float(signal_row["gap_pct_vs_prev_close"]),
         "buy_price": buy_price,
-        "sell_price": float(sell_price),
+        "sell_price": float(weighted_sell_price),
         "sell_date": sell_date.date(),
         "exit_type": exit_type,
         "holding_days": int(sell_day_idx - signal_idx),
