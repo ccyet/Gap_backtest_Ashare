@@ -16,6 +16,34 @@ from models import AnalysisParams, normalize_column_overrides, normalize_stock_c
 st.set_page_config(page_title="跳空统计分析工具", layout="wide")
 
 
+
+
+_ORIGINAL_ST_DATAFRAME = st.dataframe
+_ORIGINAL_ST_FORM_SUBMIT_BUTTON = st.form_submit_button
+
+
+def _safe_dataframe(*args: object, **kwargs: object):
+    width = kwargs.get("width")
+    if isinstance(width, str):
+        kwargs.pop("width", None)
+        params = inspect.signature(_ORIGINAL_ST_DATAFRAME).parameters
+        if "use_container_width" in params:
+            kwargs.setdefault("use_container_width", width == "stretch")
+    return _ORIGINAL_ST_DATAFRAME(*args, **kwargs)
+
+
+def _safe_form_submit_button(*args: object, **kwargs: object):
+    width = kwargs.get("width")
+    if isinstance(width, str):
+        kwargs.pop("width", None)
+        params = inspect.signature(_ORIGINAL_ST_FORM_SUBMIT_BUTTON).parameters
+        if "use_container_width" in params:
+            kwargs.setdefault("use_container_width", width == "stretch")
+    return _ORIGINAL_ST_FORM_SUBMIT_BUTTON(*args, **kwargs)
+
+
+st.dataframe = _safe_dataframe
+st.form_submit_button = _safe_form_submit_button
 DETAIL_PERCENT_COLUMNS = (
     "gap_pct_vs_prev_close",
     "gross_return_pct",
