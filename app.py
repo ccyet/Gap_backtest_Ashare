@@ -15,8 +15,16 @@ from models import AnalysisParams, normalize_column_overrides, normalize_stock_c
 st.set_page_config(page_title="跳空统计分析工具", layout="wide")
 
 
-DETAIL_PERCENT_COLUMNS = ("gap_pct_vs_prev_close", "gross_return_pct", "net_return_pct")
-DETAIL_PRICE_COLUMNS = ("prev_close", "prev_high", "prev_low", "open", "close", "buy_price", "sell_price")
+DETAIL_PERCENT_COLUMNS = (
+    "gap_pct_vs_prev_close",
+    "gross_return_pct",
+    "net_return_pct",
+    "mfe_pct",
+    "mae_pct",
+    "max_profit_pct",
+    "profit_drawdown_ratio",
+)
+DETAIL_PRICE_COLUMNS = ("prev_close", "prev_high", "prev_low", "open", "close", "buy_price", "sell_price", "exit_ma_value")
 DETAIL_NAV_COLUMNS = ("nav_before_trade", "nav_after_trade")
 SUMMARY_PERCENT_COLUMNS = ("win_rate_pct", "avg_net_return_pct", "median_net_return_pct")
 EQUITY_PERCENT_COLUMNS = ("drawdown_pct",)
@@ -254,7 +262,37 @@ with st.container(border=True):
                 options=["按原规则剔除未达条件信号", "第 N 天按收盘价结束交易"],
             )
             stop_loss_pct = st.number_input("单次亏损超过多少止损（%）", min_value=0.0, value=3.0, step=0.1)
-            take_profit_pct = st.number_input("单笔盈利超过多少止盈（%）", min_value=0.0, value=5.0, step=0.1)
+            enable_take_profit = st.checkbox("启用固定止盈", value=True)
+            take_profit_pct = st.number_input(
+                "单笔盈利超过多少止盈（%）",
+                min_value=0.0,
+                value=5.0,
+                step=0.1,
+                disabled=not enable_take_profit,
+            )
+
+            st.markdown("**盈利回撤止盈**")
+            enable_profit_drawdown_exit = st.checkbox("启用盈利回撤止盈", value=False)
+            profit_drawdown_pct = st.number_input(
+                "盈利后，如果从最高利润回落超过多少就卖出（%）",
+                min_value=0.0,
+                value=40.0,
+                step=1.0,
+                disabled=not enable_profit_drawdown_exit,
+                help="例如一度赚了 10%，后来利润回落超过 40%，就卖出。",
+            )
+
+            st.markdown("**均线离场**")
+            enable_ma_exit = st.checkbox("启用均线离场", value=False)
+            exit_ma_period = st.number_input(
+                "跌破哪条均线后卖出",
+                min_value=1,
+                value=10,
+                step=1,
+                disabled=not enable_ma_exit,
+                help="用于让盈利单继续持有，等趋势转弱再退出。",
+            )
+
             buy_cost_pct = st.number_input("买入成本（%）", min_value=0.0, value=0.03, step=0.01, format="%.4f")
             sell_cost_pct = st.number_input("卖出成本（%）", min_value=0.0, value=0.13, step=0.01, format="%.4f")
 
@@ -369,6 +407,11 @@ if submitted:
         time_stop_target_pct=float(time_stop_target_pct),
         stop_loss_pct=float(stop_loss_pct),
         take_profit_pct=float(take_profit_pct),
+        enable_take_profit=bool(enable_take_profit),
+        enable_profit_drawdown_exit=bool(enable_profit_drawdown_exit),
+        profit_drawdown_pct=float(profit_drawdown_pct),
+        enable_ma_exit=bool(enable_ma_exit),
+        exit_ma_period=int(exit_ma_period),
         buy_cost_pct=float(buy_cost_pct),
         sell_cost_pct=float(sell_cost_pct),
         time_exit_mode="strict" if time_exit_mode_label == "按原规则剔除未达条件信号" else "force_close",

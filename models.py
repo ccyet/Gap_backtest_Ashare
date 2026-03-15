@@ -23,6 +23,11 @@ class AnalysisParams:
     time_stop_target_pct: float
     stop_loss_pct: float
     take_profit_pct: float
+    enable_take_profit: bool
+    enable_profit_drawdown_exit: bool
+    profit_drawdown_pct: float
+    enable_ma_exit: bool
+    exit_ma_period: int
     buy_cost_pct: float
     sell_cost_pct: float
     time_exit_mode: str
@@ -44,6 +49,10 @@ class AnalysisParams:
         return self.take_profit_pct / 100.0
 
     @property
+    def profit_drawdown_ratio(self) -> float:
+        return self.profit_drawdown_pct / 100.0
+
+    @property
     def buy_cost_ratio(self) -> float:
         return self.buy_cost_pct / 100.0
 
@@ -53,9 +62,12 @@ class AnalysisParams:
 
     @property
     def required_lookback_days(self) -> int:
-        if not self.use_ma_filter:
-            return 5
-        return max(self.fast_ma_period, self.slow_ma_period) + 5
+        lookback = 5
+        if self.use_ma_filter:
+            lookback = max(lookback, max(self.fast_ma_period, self.slow_ma_period) + 5)
+        if self.enable_ma_exit:
+            lookback = max(lookback, self.exit_ma_period + 5)
+        return lookback
 
     @property
     def required_lookahead_days(self) -> int:
@@ -107,6 +119,15 @@ def validate_params(params: AnalysisParams) -> tuple[list[str], list[str]]:
 
     if params.take_profit_pct < 0:
         errors.append("止盈比例不能为负数。")
+
+    if params.profit_drawdown_pct < 0:
+        errors.append("盈利回撤比例不能为负数。")
+
+    if params.enable_profit_drawdown_exit and params.profit_drawdown_pct > 100:
+        warnings.append("盈利回撤比例大于 100%，通常会导致很难触发，请确认设置。")
+
+    if params.enable_ma_exit and params.exit_ma_period < 1:
+        errors.append("止盈参考均线周期必须大于等于 1。")
 
     if params.buy_cost_pct < 0 or params.sell_cost_pct < 0:
         errors.append("买入成本和卖出成本都不能为负数。")

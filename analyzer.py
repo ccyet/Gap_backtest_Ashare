@@ -28,6 +28,9 @@ BASE_DETAIL_COLUMNS = [
     "win_flag",
     "mfe_pct",
     "mae_pct",
+    "max_profit_pct",
+    "exit_ma_value",
+    "profit_drawdown_ratio",
 ]
 
 DETAIL_COLUMNS = BASE_DETAIL_COLUMNS + [
