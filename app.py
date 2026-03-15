@@ -29,7 +29,12 @@ def _safe_dataframe(*args: object, **kwargs: object):
         params = inspect.signature(_ORIGINAL_ST_DATAFRAME).parameters
         if "use_container_width" in params:
             kwargs.setdefault("use_container_width", width == "stretch")
-    return _ORIGINAL_ST_DATAFRAME(*args, **kwargs)
+    try:
+        return _ORIGINAL_ST_DATAFRAME(*args, **kwargs)
+    except TypeError:
+        kwargs.pop("width", None)
+        kwargs.pop("use_container_width", None)
+        return _ORIGINAL_ST_DATAFRAME(*args, **kwargs)
 
 
 def _safe_form_submit_button(*args: object, **kwargs: object):
@@ -39,7 +44,12 @@ def _safe_form_submit_button(*args: object, **kwargs: object):
         params = inspect.signature(_ORIGINAL_ST_FORM_SUBMIT_BUTTON).parameters
         if "use_container_width" in params:
             kwargs.setdefault("use_container_width", width == "stretch")
-    return _ORIGINAL_ST_FORM_SUBMIT_BUTTON(*args, **kwargs)
+    try:
+        return _ORIGINAL_ST_FORM_SUBMIT_BUTTON(*args, **kwargs)
+    except TypeError:
+        kwargs.pop("width", None)
+        kwargs.pop("use_container_width", None)
+        return _ORIGINAL_ST_FORM_SUBMIT_BUTTON(*args, **kwargs)
 
 
 st.dataframe = _safe_dataframe
@@ -65,7 +75,7 @@ def dataframe_stretch(data: object, *, hide_index: bool = False) -> None:
     kwargs: dict[str, object] = {"hide_index": hide_index}
     if "use_container_width" in params:
         kwargs["use_container_width"] = True
-    st.dataframe(data, **kwargs)
+    _safe_dataframe(data, **kwargs)
 
 
 def form_submit_button_stretch(label: str) -> bool:
@@ -73,7 +83,7 @@ def form_submit_button_stretch(label: str) -> bool:
     kwargs: dict[str, object] = {}
     if "use_container_width" in params:
         kwargs["use_container_width"] = True
-    return st.form_submit_button(label, **kwargs)
+    return _safe_form_submit_button(label, **kwargs)
 
 
 def clear_result_state() -> None:
