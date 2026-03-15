@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from io import BytesIO
-import inspect
 from pathlib import Path
 
 import pandas as pd
@@ -18,72 +17,12 @@ st.set_page_config(page_title="跳空统计分析工具", layout="wide")
 
 
 
-_ORIGINAL_ST_DATAFRAME = st.dataframe
-_ORIGINAL_ST_FORM_SUBMIT_BUTTON = st.form_submit_button
-
-
-def _safe_dataframe(*args: object, **kwargs: object):
-    width = kwargs.get("width")
-    if isinstance(width, str):
-        kwargs.pop("width", None)
-        params = inspect.signature(_ORIGINAL_ST_DATAFRAME).parameters
-        if "use_container_width" in params:
-            kwargs.setdefault("use_container_width", width == "stretch")
-    try:
-        return _ORIGINAL_ST_DATAFRAME(*args, **kwargs)
-    except TypeError:
-        kwargs.pop("width", None)
-        kwargs.pop("use_container_width", None)
-        return _ORIGINAL_ST_DATAFRAME(*args, **kwargs)
-
-
-def _safe_form_submit_button(*args: object, **kwargs: object):
-    width = kwargs.get("width")
-    if isinstance(width, str):
-        kwargs.pop("width", None)
-        params = inspect.signature(_ORIGINAL_ST_FORM_SUBMIT_BUTTON).parameters
-        if "use_container_width" in params:
-            kwargs.setdefault("use_container_width", width == "stretch")
-    try:
-        return _ORIGINAL_ST_FORM_SUBMIT_BUTTON(*args, **kwargs)
-    except TypeError:
-        kwargs.pop("width", None)
-        kwargs.pop("use_container_width", None)
-        return _ORIGINAL_ST_FORM_SUBMIT_BUTTON(*args, **kwargs)
-
-
-st.dataframe = _safe_dataframe
-st.form_submit_button = _safe_form_submit_button
-DETAIL_PERCENT_COLUMNS = (
-    "gap_pct_vs_prev_close",
-    "gross_return_pct",
-    "net_return_pct",
-    "mfe_pct",
-    "mae_pct",
-    "max_profit_pct",
-    "profit_drawdown_ratio",
-)
-DETAIL_PRICE_COLUMNS = ("prev_close", "prev_high", "prev_low", "open", "close", "buy_price", "sell_price", "exit_ma_value")
-DETAIL_NAV_COLUMNS = ("nav_before_trade", "nav_after_trade")
-SUMMARY_PERCENT_COLUMNS = ("win_rate_pct", "avg_net_return_pct", "median_net_return_pct")
-EQUITY_PERCENT_COLUMNS = ("drawdown_pct",)
-RESULT_STATE_KEYS = ("detail_df", "daily_df", "equity_df", "stats", "excel_bytes", "download_name")
-
-
 def dataframe_stretch(data: object, *, hide_index: bool = False) -> None:
-    params = inspect.signature(st.dataframe).parameters
-    kwargs: dict[str, object] = {"hide_index": hide_index}
-    if "use_container_width" in params:
-        kwargs["use_container_width"] = True
-    _safe_dataframe(data, **kwargs)
+    st.dataframe(data, hide_index=hide_index)
 
 
 def form_submit_button_stretch(label: str) -> bool:
-    params = inspect.signature(st.form_submit_button).parameters
-    kwargs: dict[str, object] = {}
-    if "use_container_width" in params:
-        kwargs["use_container_width"] = True
-    return _safe_form_submit_button(label, **kwargs)
+    return st.form_submit_button(label)
 
 
 def clear_result_state() -> None:
