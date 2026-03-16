@@ -177,3 +177,35 @@ def test_case_k_zero_value_param_not_ignored():
     )
     errors, _ = validate_params(params)
     assert not errors
+
+
+def test_partial_case_l_drawdown_uses_updated_trailing_peak():
+    rules = (
+        PartialExitRule(True, 100, "profit_drawdown", 1, drawdown_pct=20.0, min_profit_to_activate_drawdown=5.0),
+        PartialExitRule(False, 0, "fixed_tp", 2, target_profit_pct=1.0),
+    )
+    # buy=100, 峰值先到 110（若按旧峰值20%回撤阈值=88会误触发），后续新峰值到 120，
+    # 再回撤到 96（=120*(1-20%)）时才应触发。
+    df = make_stock_df([
+        (100, 101, 99, 100),
+        (100, 110, 99, 100),
+        (100, 120, 99, 119),
+        (119, 119, 95, 96),
+    ])
+    trade, reason = simulate_trade(
+        df,
+        0,
+        make_params(
+            partial_exit_enabled=True,
+            partial_exit_count=2,
+            partial_exit_rules=rules,
+            enable_take_profit=False,
+            stop_loss_pct=50.0,
+            time_stop_days=3,
+            time_stop_target_pct=-50.0,
+        ),
+    )
+    assert reason is None
+    assert trade["fills"][-1]["exit_type"] == "profit_drawdown"
+    assert trade["fills"][-1]["holding_days"] == 3
+    assert trade["fills"][-1]["sell_price"] == 96

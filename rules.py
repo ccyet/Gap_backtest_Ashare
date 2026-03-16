@@ -140,6 +140,7 @@ def simulate_trade(
         day_close = float(day_row["close"])
         day_high = float(day_row["high"])
 
+        # peak_price 为持仓以来动态更新的价格峰值（trailing peak），并非固定常量。
         peak_price = max(peak_price, day_high)
 
         # 1) 全仓止损
