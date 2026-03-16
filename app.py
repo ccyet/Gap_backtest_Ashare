@@ -262,41 +262,71 @@ with st.container(border=True):
             )
 
         with base_right:
-            time_stop_days = st.number_input("最多持有几天", min_value=1, value=5, step=1)
-            time_stop_target_pct = st.number_input("到期最低目标涨幅（%）", value=1.0, step=0.1)
-            time_exit_mode_label = st.selectbox(
-                "到第 N 天后怎么处理",
-                options=["按原规则剔除未达条件信号", "第 N 天按收盘价结束交易"],
+            time_stop_days = st.number_input(
+                "最多持有几天",
+                min_value=1,
+                value=5,
+                step=1,
+                help="从买入后第 1 天开始计数；超过该天数后会按时间退出规则持续检查。",
             )
-            stop_loss_pct = st.number_input("单次亏损超过多少止损（%）", min_value=0.0, value=3.0, step=0.1)
-            enable_take_profit = st.checkbox("启用固定止盈", value=True)
+            time_stop_target_pct = st.number_input(
+                "时间退出最低收益目标（%）",
+                value=1.0,
+                step=0.1,
+                help="当持有天数 >= N 时，若累计收益低于该值就触发 time_exit。",
+            )
+            time_exit_mode_label = st.selectbox(
+                "数据结束时未平仓怎么处理",
+                options=["按原规则剔除未达条件信号", "第 N 天按收盘价结束交易"],
+                help="前者更严格（strict），后者会尝试补平（force_close）。",
+            )
+            stop_loss_pct = st.number_input(
+                "单次亏损超过多少止损（%）",
+                min_value=0.0,
+                value=3.0,
+                step=0.1,
+                help="全仓止损优先级最高，触发后会直接卖出全部剩余仓位。",
+            )
+            buy_cost_pct = st.number_input("买入成本（%）", min_value=0.0, value=0.03, step=0.01, format="%.4f")
+            sell_cost_pct = st.number_input("卖出成本（%）", min_value=0.0, value=0.13, step=0.01, format="%.4f")
+
+        st.markdown("#### 卖出规则设置")
+        exit_col_left, exit_col_right = st.columns(2)
+
+        with exit_col_left:
+            st.markdown("**整笔卖出（分批关闭时将自动停用）**")
+            enable_take_profit = st.checkbox("启用固定止盈", value=True, help="当价格达到目标收益时整笔平仓。")
             take_profit_pct = st.number_input(
-                "单笔盈利超过多少止盈（%）",
+                "固定止盈阈值（%）",
                 min_value=0.0,
                 value=5.0,
                 step=0.1,
                 disabled=not enable_take_profit,
+                help="例如 5 表示涨到买入价的 105% 时触发。",
             )
 
-            st.markdown("**盈利回撤止盈**")
-            enable_profit_drawdown_exit = st.checkbox("启用盈利回撤止盈", value=False)
+            enable_profit_drawdown_exit = st.checkbox(
+                "启用盈利回撤止盈",
+                value=False,
+                help="仅在未启用分批时生效，用于趋势回落时整笔离场。",
+            )
             profit_drawdown_pct = st.number_input(
-                "盈利后，如果从最高利润回落超过多少就卖出（%）",
+                "盈利回撤比例（%）",
                 min_value=0.0,
                 value=40.0,
                 step=1.0,
                 disabled=not enable_profit_drawdown_exit,
-                help="例如一度赚了 10%，后来利润回落超过 40%，就卖出。",
+                help="示例：一度盈利 10%，若回撤超过 40%（即回到盈利 6% 以下）则卖出。",
             )
 
-            st.markdown("**均线离场（旧版整笔逻辑）**")
-            enable_ma_exit = st.checkbox("启用均线离场", value=False)
+            enable_ma_exit = st.checkbox("启用均线离场", value=False, help="仅在未启用分批时生效。")
             exit_ma_period = st.number_input(
                 "跌破哪条均线后卖出",
                 min_value=1,
                 value=10,
                 step=1,
                 disabled=not enable_ma_exit,
+                help="收盘价跌破该均线时触发整笔离场。",
             )
             ma_exit_batches = st.number_input(
                 "均线离场分几批卖出",
@@ -305,11 +335,25 @@ with st.container(border=True):
                 value=2,
                 step=1,
                 disabled=not enable_ma_exit,
+                help="旧版参数保留，分批止盈开启后将不参与退出判断。",
             )
 
-            st.markdown("**分批止盈（新）**")
-            partial_exit_enabled = st.checkbox("启用分批止盈", value=False)
-            partial_exit_count = st.number_input("分批数量", min_value=2, max_value=3, value=2, step=1, disabled=not partial_exit_enabled)
+        with exit_col_right:
+            st.markdown("**分批止盈（推荐）**")
+            partial_exit_enabled = st.checkbox(
+                "启用分批止盈",
+                value=False,
+                help="开启后可将同一笔交易拆成 2~3 批独立离场，按 priority 顺序执行。",
+            )
+            partial_exit_count = st.number_input(
+                "分批数量",
+                min_value=2,
+                max_value=3,
+                value=2,
+                step=1,
+                disabled=not partial_exit_enabled,
+                help="默认 2 批，最多 3 批。",
+            )
 
             partial_rule_inputs = []
             for i in range(1, int(partial_exit_count) + 1):
@@ -317,19 +361,75 @@ with st.container(border=True):
                     col_a, col_b = st.columns(2)
                     with col_a:
                         weight_default = 50.0 if int(partial_exit_count) == 2 else [30.0, 30.0, 40.0][i - 1]
-                        weight_pct = st.number_input(f"第{i}批 仓位比例 %", min_value=0.0, max_value=100.0, value=weight_default, step=1.0, disabled=not partial_exit_enabled, key=f"p_weight_{i}")
+                        weight_pct = st.number_input(
+                            f"第{i}批 仓位比例 %",
+                            min_value=0.0,
+                            max_value=100.0,
+                            value=weight_default,
+                            step=1.0,
+                            disabled=not partial_exit_enabled,
+                            key=f"p_weight_{i}",
+                            help="该批卖出的仓位占比。全部启用批次合计应为 100%。",
+                        )
                         priority_default = i
-                        priority = st.number_input(f"第{i}批 priority", min_value=1, max_value=10, value=priority_default, step=1, disabled=not partial_exit_enabled, key=f"p_priority_{i}")
+                        priority = st.number_input(
+                            f"第{i}批 priority",
+                            min_value=1,
+                            max_value=10,
+                            value=priority_default,
+                            step=1,
+                            disabled=not partial_exit_enabled,
+                            key=f"p_priority_{i}",
+                            help="同一天触发多条规则时，数字越小越先执行。",
+                        )
                     with col_b:
                         mode_default = ["fixed_tp", "ma_exit"][i - 1] if int(partial_exit_count) == 2 else ["fixed_tp", "fixed_tp", "ma_exit"][i - 1]
-                        mode = st.selectbox(f"第{i}批 退出方式", options=["fixed_tp", "ma_exit", "profit_drawdown"], index=["fixed_tp", "ma_exit", "profit_drawdown"].index(mode_default), disabled=not partial_exit_enabled, key=f"p_mode_{i}")
+                        mode = st.selectbox(
+                            f"第{i}批 退出方式",
+                            options=["fixed_tp", "ma_exit", "profit_drawdown"],
+                            index=["fixed_tp", "ma_exit", "profit_drawdown"].index(mode_default),
+                            disabled=not partial_exit_enabled,
+                            key=f"p_mode_{i}",
+                            help="fixed_tp: 固定目标收益；ma_exit: 跌破均线；profit_drawdown: 价格峰值回撤。",
+                        )
 
                     target_profit_default = 5.0 if int(partial_exit_count) == 2 and i == 1 else (3.0 if i == 1 else (6.0 if i == 2 else 0.0))
-                    target_profit_pct = st.number_input(f"第{i}批 目标收益 %", value=target_profit_default, step=0.1, disabled=(not partial_exit_enabled) or mode != "fixed_tp", key=f"p_tp_{i}")
+                    target_profit_pct = st.number_input(
+                        f"第{i}批 目标收益 %",
+                        value=target_profit_default,
+                        step=0.1,
+                        disabled=(not partial_exit_enabled) or mode != "fixed_tp",
+                        key=f"p_tp_{i}",
+                        help="仅 fixed_tp 使用。",
+                    )
                     ma_period_default = 10
-                    ma_period = st.number_input(f"第{i}批 均线周期", min_value=1, value=ma_period_default, step=1, disabled=(not partial_exit_enabled) or mode != "ma_exit", key=f"p_ma_{i}")
-                    drawdown_pct = st.number_input(f"第{i}批 回撤比例 %", min_value=0.0, value=20.0, step=0.1, disabled=(not partial_exit_enabled) or mode != "profit_drawdown", key=f"p_dd_{i}")
-                    min_profit_activation = st.number_input(f"第{i}批 最小浮盈激活门槛 %", min_value=0.0, value=5.0, step=0.1, disabled=(not partial_exit_enabled) or mode != "profit_drawdown", key=f"p_mpa_{i}")
+                    ma_period = st.number_input(
+                        f"第{i}批 均线周期",
+                        min_value=1,
+                        value=ma_period_default,
+                        step=1,
+                        disabled=(not partial_exit_enabled) or mode != "ma_exit",
+                        key=f"p_ma_{i}",
+                        help="仅 ma_exit 使用。",
+                    )
+                    drawdown_pct = st.number_input(
+                        f"第{i}批 回撤比例 %",
+                        min_value=0.0,
+                        value=20.0,
+                        step=0.1,
+                        disabled=(not partial_exit_enabled) or mode != "profit_drawdown",
+                        key=f"p_dd_{i}",
+                        help="仅 profit_drawdown 使用，按持仓以来最高价计算回撤。",
+                    )
+                    min_profit_activation = st.number_input(
+                        f"第{i}批 最小浮盈激活门槛 %",
+                        min_value=0.0,
+                        value=5.0,
+                        step=0.1,
+                        disabled=(not partial_exit_enabled) or mode != "profit_drawdown",
+                        key=f"p_mpa_{i}",
+                        help="仅 profit_drawdown 使用，达到该浮盈后才开始检查回撤。",
+                    )
 
                 partial_rule_inputs.append({
                     "enabled": bool(partial_exit_enabled),
@@ -341,9 +441,6 @@ with st.container(border=True):
                     "drawdown_pct": float(drawdown_pct) if mode == "profit_drawdown" else None,
                     "min_profit_to_activate_drawdown": float(min_profit_activation) if mode == "profit_drawdown" else None,
                 })
-
-            buy_cost_pct = st.number_input("买入成本（%）", min_value=0.0, value=0.03, step=0.01, format="%.4f")
-            sell_cost_pct = st.number_input("卖出成本（%）", min_value=0.0, value=0.13, step=0.01, format="%.4f")
 
         with st.expander("字段映射（选填，数据库字段名不标准时再填写）"):
             map_col_1, map_col_2, map_col_3 = st.columns(3)
