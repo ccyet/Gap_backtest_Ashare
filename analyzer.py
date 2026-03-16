@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+import json
 
 import pandas as pd
 
@@ -31,6 +32,9 @@ BASE_DETAIL_COLUMNS = [
     "max_profit_pct",
     "exit_ma_value",
     "profit_drawdown_ratio",
+    "fills",
+    "fill_count",
+    "fill_detail_json",
 ]
 
 DETAIL_COLUMNS = BASE_DETAIL_COLUMNS + [
@@ -67,6 +71,7 @@ def _empty_scan_stats() -> dict[str, int]:
         "skipped_insufficient_future": 0,
         "skipped_time_target_met": 0,
         "skipped_no_exit": 0,
+        "skipped_unclosed_trade": 0,
     }
 
 
@@ -111,10 +116,20 @@ def scan_trade_candidates(all_data: pd.DataFrame, params: AnalysisParams) -> tup
                     stats["skipped_insufficient_future"] += 1
                 elif skip_reason == "time_target_met":
                     stats["skipped_time_target_met"] += 1
+                elif skip_reason == "unclosed_trade":
+                    stats["skipped_unclosed_trade"] += 1
                 else:
                     stats["skipped_no_exit"] += 1
                 continue
 
+            fills = trade.get("fills", [])
+            total_weight = sum(float(fill.get("weight", 0.0)) for fill in fills)
+            if total_weight <= 0:
+                stats["skipped_no_exit"] += 1
+                continue
+
+            trade["fill_count"] = len(fills)
+            trade["fill_detail_json"] = json.dumps(fills, ensure_ascii=False)
             detail_records.append(trade)
             stats["closed_trade_candidates"] += 1
 

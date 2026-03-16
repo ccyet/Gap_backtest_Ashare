@@ -9,7 +9,7 @@ import streamlit as st
 from analyzer import analyze_all_stocks
 from data_loader import describe_file_source, describe_tables, list_candidate_tables, load_market_data
 from exporter import export_to_excel_bytes
-from models import AnalysisParams, normalize_column_overrides, normalize_stock_codes, validate_params
+from models import AnalysisParams, PartialExitRule, normalize_column_overrides, normalize_stock_codes, validate_params
 
 
 st.set_page_config(page_title="跳空统计分析工具", layout="wide")
@@ -296,6 +296,48 @@ with st.container(border=True):
                 help="预设 2 批，最多 3 批。触发均线离场时按批次逐步卖出。",
             )
 
+            st.markdown("**分批止盈**")
+            partial_exit_enabled = st.checkbox("启用分批止盈", value=False)
+            partial_exit_count = st.number_input("分批数量", min_value=2, max_value=3, value=2, step=1, disabled=not partial_exit_enabled)
+
+            default_rules_2 = [
+                {"weight": 50.0, "priority": 1, "mode": "fixed_tp", "tp": 5.0, "ma": 10, "dd": 30.0, "act": 5.0},
+                {"weight": 50.0, "priority": 2, "mode": "ma_exit", "tp": 6.0, "ma": 10, "dd": 30.0, "act": 5.0},
+            ]
+            default_rules_3 = [
+                {"weight": 30.0, "priority": 1, "mode": "fixed_tp", "tp": 3.0, "ma": 10, "dd": 30.0, "act": 5.0},
+                {"weight": 30.0, "priority": 2, "mode": "fixed_tp", "tp": 6.0, "ma": 10, "dd": 30.0, "act": 5.0},
+                {"weight": 40.0, "priority": 3, "mode": "ma_exit", "tp": 8.0, "ma": 10, "dd": 30.0, "act": 5.0},
+            ]
+            defaults = default_rules_2 if int(partial_exit_count) == 2 else default_rules_3
+            partial_exit_rules: list[PartialExitRule] = []
+            for idx in range(int(partial_exit_count)):
+                st.caption(f"第 {idx + 1} 批")
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    weight = st.number_input(f"仓位比例%_batch_{idx+1}", min_value=0.0, max_value=100.0, value=float(defaults[idx]["weight"]), step=1.0, disabled=not partial_exit_enabled)
+                    priority = st.number_input(f"priority_batch_{idx+1}", min_value=1, max_value=10, value=int(defaults[idx]["priority"]), step=1, disabled=not partial_exit_enabled)
+                with c2:
+                    mode = st.selectbox(f"退出方式_batch_{idx+1}", options=["fixed_tp", "ma_exit", "profit_drawdown"], index=["fixed_tp", "ma_exit", "profit_drawdown"].index(defaults[idx]["mode"]), disabled=not partial_exit_enabled)
+                    target_profit = st.number_input(f"目标收益%_batch_{idx+1}", min_value=0.0, value=float(defaults[idx]["tp"]), step=0.1, disabled=(not partial_exit_enabled or mode != "fixed_tp"))
+                with c3:
+                    ma_period_partial = st.number_input(f"均线周期_batch_{idx+1}", min_value=1, value=int(defaults[idx]["ma"]), step=1, disabled=(not partial_exit_enabled or mode != "ma_exit"))
+                    drawdown_pct_partial = st.number_input(f"回撤比例%_batch_{idx+1}", min_value=0.0, value=float(defaults[idx]["dd"]), step=0.1, disabled=(not partial_exit_enabled or mode != "profit_drawdown"))
+                    min_profit_activate = st.number_input(f"最小浮盈激活%_batch_{idx+1}", min_value=0.0, value=float(defaults[idx]["act"]), step=0.1, disabled=(not partial_exit_enabled or mode != "profit_drawdown"))
+
+                partial_exit_rules.append(
+                    PartialExitRule(
+                        enabled=bool(partial_exit_enabled),
+                        weight_pct=float(weight),
+                        mode=str(mode),
+                        priority=int(priority),
+                        target_profit_pct=float(target_profit) if mode == "fixed_tp" else None,
+                        ma_period=int(ma_period_partial) if mode == "ma_exit" else None,
+                        drawdown_pct=float(drawdown_pct_partial) if mode == "profit_drawdown" else None,
+                        min_profit_to_activate_drawdown=float(min_profit_activate) if mode == "profit_drawdown" else None,
+                    )
+                )
+
             buy_cost_pct = st.number_input("买入成本（%）", min_value=0.0, value=0.03, step=0.01, format="%.4f")
             sell_cost_pct = st.number_input("卖出成本（%）", min_value=0.0, value=0.13, step=0.01, format="%.4f")
 
@@ -419,6 +461,9 @@ if submitted:
         buy_cost_pct=float(buy_cost_pct),
         sell_cost_pct=float(sell_cost_pct),
         time_exit_mode="strict" if time_exit_mode_label == "按原规则剔除未达条件信号" else "force_close",
+        partial_exit_enabled=bool(partial_exit_enabled),
+        partial_exit_count=int(partial_exit_count),
+        partial_exit_rules=tuple(partial_exit_rules),
     )
 
     errors, warnings = validate_params(params)

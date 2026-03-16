@@ -1,6 +1,29 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+
+@dataclass(frozen=True)
+class PartialExitRule:
+    enabled: bool
+    weight_pct: float
+    mode: str
+    priority: int
+    target_profit_pct: float | None = None
+    ma_period: int | None = None
+    drawdown_pct: float | None = None
+    min_profit_to_activate_drawdown: float | None = 5.0
+
+
+
+
+@dataclass(frozen=True)
+class TradeFill:
+    sell_date: str
+    sell_price: float
+    weight: float
+    exit_type: str
+    holding_days: int
 
 
 @dataclass(frozen=True)
@@ -32,6 +55,9 @@ class AnalysisParams:
     buy_cost_pct: float
     sell_cost_pct: float
     time_exit_mode: str
+    partial_exit_enabled: bool = False
+    partial_exit_count: int = 2
+    partial_exit_rules: tuple[PartialExitRule, ...] = field(default_factory=tuple)
 
     @property
     def gap_ratio(self) -> float:
@@ -68,6 +94,10 @@ class AnalysisParams:
             lookback = max(lookback, max(self.fast_ma_period, self.slow_ma_period) + 5)
         if self.enable_ma_exit:
             lookback = max(lookback, self.exit_ma_period + 5)
+        if self.partial_exit_enabled:
+            partial_ma_periods = [rule.ma_period for rule in self.partial_exit_rules if rule.enabled and rule.mode == "ma_exit"]
+            if partial_ma_periods:
+                lookback = max(lookback, max(period for period in partial_ma_periods if period is not None) + 5)
         return lookback
 
     @property
@@ -132,6 +162,41 @@ def validate_params(params: AnalysisParams) -> tuple[list[str], list[str]]:
 
     if params.enable_ma_exit and not (2 <= params.ma_exit_batches <= 3):
         errors.append("均线离场分批数必须在 2 到 3 之间。")
+
+    if params.partial_exit_count not in {2, 3}:
+        errors.append("分批数量只能为 2 或 3。")
+
+    if params.partial_exit_enabled:
+        enabled_rules = [rule for rule in params.partial_exit_rules if rule.enabled]
+        if len(enabled_rules) != params.partial_exit_count:
+            errors.append("启用分批止盈时，启用规则数必须与分批数量一致。")
+
+        total_weight = sum(rule.weight_pct for rule in enabled_rules)
+        if abs(total_weight - 100.0) > 1e-9:
+            errors.append("启用分批止盈时，所有启用规则的仓位比例之和必须等于 100%。")
+
+        priorities = [rule.priority for rule in enabled_rules]
+        if len(priorities) != len(set(priorities)):
+            errors.append("启用分批止盈时，priority 必须唯一。")
+
+        valid_modes = {"fixed_tp", "ma_exit", "profit_drawdown"}
+        for index, rule in enumerate(enabled_rules, start=1):
+            if rule.mode not in valid_modes:
+                errors.append(f"第 {index} 条分批规则的退出方式不合法。")
+            if rule.weight_pct < 0:
+                errors.append(f"第 {index} 条分批规则的仓位比例不能为负数。")
+            if rule.mode == "fixed_tp" and rule.target_profit_pct is None:
+                errors.append(f"第 {index} 条分批规则（fixed_tp）缺少目标收益。")
+            if rule.mode == "ma_exit" and rule.ma_period is None:
+                errors.append(f"第 {index} 条分批规则（ma_exit）缺少均线周期。")
+            if rule.mode == "ma_exit" and rule.ma_period is not None and rule.ma_period < 1:
+                errors.append(f"第 {index} 条分批规则（ma_exit）均线周期必须大于等于 1。")
+            if rule.mode == "profit_drawdown" and rule.drawdown_pct is None:
+                errors.append(f"第 {index} 条分批规则（profit_drawdown）缺少回撤比例。")
+            if rule.target_profit_pct is not None and rule.target_profit_pct < 0:
+                errors.append(f"第 {index} 条分批规则目标收益不能为负数。")
+            if rule.drawdown_pct is not None and rule.drawdown_pct < 0:
+                errors.append(f"第 {index} 条分批规则回撤比例不能为负数。")
 
     if params.buy_cost_pct < 0 or params.sell_cost_pct < 0:
         errors.append("买入成本和卖出成本都不能为负数。")

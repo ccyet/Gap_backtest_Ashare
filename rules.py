@@ -5,7 +5,7 @@ from typing import Any
 
 import pandas as pd
 
-from models import AnalysisParams
+from models import AnalysisParams, PartialExitRule
 
 
 SIGNAL_COLUMNS = [
@@ -20,6 +20,8 @@ SIGNAL_COLUMNS = [
     "gap_pct_vs_prev_close",
 ]
 
+FLOAT_TOLERANCE = 1e-12
+
 
 def apply_gap_filters(df: pd.DataFrame, params: AnalysisParams) -> pd.DataFrame:
     stock_df = df.sort_values("date").reset_index(drop=True).copy()
@@ -30,7 +32,6 @@ def apply_gap_filters(df: pd.DataFrame, params: AnalysisParams) -> pd.DataFrame:
     stock_df["gap_pct_vs_prev_close"] = (stock_df["open"] / stock_df["prev_close"] - 1.0) * 100.0
 
     if params.use_ma_filter:
-        # 开单过滤只能使用信号当日开盘前已经知道的数据，因此均线向后移一日。
         stock_df["fast_ma"] = stock_df["close"].rolling(params.fast_ma_period).mean().shift(1)
         stock_df["slow_ma"] = stock_df["close"].rolling(params.slow_ma_period).mean().shift(1)
     else:
@@ -58,12 +59,59 @@ def apply_gap_filters(df: pd.DataFrame, params: AnalysisParams) -> pd.DataFrame:
     return stock_df
 
 
-def simulate_trade(
-    stock_df: pd.DataFrame,
-    signal_idx: int,
-    params: AnalysisParams,
-) -> tuple[dict[str, Any] | None, str | None]:
-    if signal_idx + params.time_stop_days >= len(stock_df):
+def _build_partial_ma_map(stock_df: pd.DataFrame, params: AnalysisParams) -> dict[int, pd.Series]:
+    if not params.partial_exit_enabled:
+        return {}
+    periods = sorted(
+        {
+            int(rule.ma_period)
+            for rule in params.partial_exit_rules
+            if rule.enabled and rule.mode == "ma_exit" and rule.ma_period is not None
+        }
+    )
+    return {period: stock_df["close"].rolling(period).mean() for period in periods}
+
+
+def _trigger_partial_rule(
+    rule: PartialExitRule,
+    day_row: pd.Series,
+    day_idx: int,
+    buy_price: float,
+    peak_price: float,
+    ma_map: dict[int, pd.Series],
+) -> bool:
+    day_close = float(day_row["close"])
+    day_high = float(day_row["high"])
+
+    if rule.mode == "fixed_tp" and rule.target_profit_pct is not None:
+        target_profit_ratio = rule.target_profit_pct / 100.0
+        return day_high >= buy_price * (1.0 + target_profit_ratio)
+
+    if rule.mode == "ma_exit" and rule.ma_period is not None:
+        ma_series = ma_map.get(int(rule.ma_period))
+        if ma_series is None:
+            return False
+        ma_value = ma_series.iloc[day_idx]
+        return pd.notna(ma_value) and day_close < float(ma_value)
+
+    if rule.mode == "profit_drawdown" and rule.drawdown_pct is not None:
+        activation = 0.05
+        if rule.min_profit_to_activate_drawdown is not None:
+            activation = rule.min_profit_to_activate_drawdown / 100.0
+        if buy_price <= 0:
+            return False
+        if (peak_price / buy_price - 1.0) < activation:
+            return False
+        if peak_price <= 0:
+            return False
+        drawdown_ratio = (peak_price - day_close) / peak_price
+        return drawdown_ratio >= (rule.drawdown_pct / 100.0)
+
+    return False
+
+
+def simulate_trade(stock_df: pd.DataFrame, signal_idx: int, params: AnalysisParams) -> tuple[dict[str, Any] | None, str | None]:
+    if signal_idx + 1 >= len(stock_df):
         return None, "insufficient_future"
 
     signal_row = stock_df.iloc[signal_idx]
@@ -72,26 +120,22 @@ def simulate_trade(
 
     stop_loss_price = buy_price * (1.0 - params.stop_loss_ratio)
     take_profit_price = buy_price * (1.0 + params.take_profit_ratio)
-    exit_ma_series = (
-        stock_df["close"].rolling(params.exit_ma_period).mean() if params.enable_ma_exit else pd.Series(math.nan, index=stock_df.index)
-    )
+    legacy_ma_series = stock_df["close"].rolling(params.exit_ma_period).mean() if params.enable_ma_exit else pd.Series(math.nan, index=stock_df.index)
+    partial_ma_map = _build_partial_ma_map(stock_df, params)
 
-    # 均线离场分批：默认 2 批，最多 3 批。
-    planned_ma_batches = max(2, min(int(params.ma_exit_batches), 3)) if params.enable_ma_exit else 1
-    ma_batch_weight = 1.0 / planned_ma_batches
+    fills: list[dict[str, Any]] = []
     remaining_weight = 1.0
-    accumulated_sell_value = 0.0
-    ma_batches_executed = 0
-
-    sell_price: float | None = None
-    exit_type: str | None = None
-    sell_day_idx: int | None = None
-    sell_date: pd.Timestamp | None = None
-    triggered_profit_drawdown_ratio = math.nan
-    triggered_exit_ma_value = math.nan
-
+    peak_price = buy_price
     max_profit_pct = 0.0
-    time_exit_checked = False
+    triggered_exit_ma_value = math.nan
+    triggered_profit_drawdown_ratio = math.nan
+    exited = False
+
+    enabled_partial_rules = sorted(
+        [rule for rule in params.partial_exit_rules if rule.enabled],
+        key=lambda item: item.priority,
+    )
+    partial_rule_executed: set[int] = set()
 
     max_holding_days = len(stock_df) - signal_idx - 1
 
@@ -100,69 +144,150 @@ def simulate_trade(
         day_row = stock_df.iloc[day_idx]
         day_date = pd.Timestamp(day_row["date"])
         day_close = float(day_row["close"])
+        day_high = float(day_row["high"])
 
-        # 1) 固定止损
-        if day_row["low"] <= stop_loss_price:
-            sell_price = stop_loss_price
-            exit_type = "stop_loss"
-        # 2) 固定止盈（可选）
-        elif params.enable_take_profit and day_row["high"] >= take_profit_price:
-            sell_price = take_profit_price
-            exit_type = "take_profit"
-        else:
-            # 3) 更新最大浮盈
-            max_profit_pct = max(max_profit_pct, float(day_row["high"]) / buy_price - 1.0)
+        peak_price = max(peak_price, day_high)
+        max_profit_pct = max(max_profit_pct, peak_price / buy_price - 1.0)
 
-            # 4) 盈利回撤止盈（可选）
+        # 1) 全仓止损
+        if float(day_row["low"]) <= stop_loss_price and remaining_weight > FLOAT_TOLERANCE:
+            fills.append(
+                {
+                    "sell_date": str(day_date.date()),
+                    "sell_price": stop_loss_price,
+                    "weight": remaining_weight,
+                    "exit_type": "stop_loss",
+                    "holding_days": holding_days,
+                }
+            )
+            remaining_weight = 0.0
+            exited = True
+            break
+
+        # 2) 分批退出（按 priority）
+        if params.partial_exit_enabled and remaining_weight > FLOAT_TOLERANCE:
+            for idx, rule in enumerate(enabled_partial_rules):
+                if idx in partial_rule_executed:
+                    continue
+                if remaining_weight <= FLOAT_TOLERANCE:
+                    break
+
+                if _trigger_partial_rule(rule, day_row, day_idx, buy_price, peak_price, partial_ma_map):
+                    target_weight = rule.weight_pct / 100.0
+                    fill_weight = min(target_weight, remaining_weight)
+                    fills.append(
+                        {
+                            "sell_date": str(day_date.date()),
+                            "sell_price": day_close,
+                            "weight": fill_weight,
+                            "exit_type": rule.mode,
+                            "holding_days": holding_days,
+                        }
+                    )
+                    remaining_weight -= fill_weight
+                    partial_rule_executed.add(idx)
+
+            if remaining_weight <= FLOAT_TOLERANCE:
+                exited = True
+                break
+
+        # 3) 未启用分批时旧版单次退出逻辑
+        if not params.partial_exit_enabled and remaining_weight > FLOAT_TOLERANCE:
+            if params.enable_take_profit and day_high >= take_profit_price:
+                fills.append(
+                    {
+                        "sell_date": str(day_date.date()),
+                        "sell_price": take_profit_price,
+                        "weight": remaining_weight,
+                        "exit_type": "take_profit",
+                        "holding_days": holding_days,
+                    }
+                )
+                remaining_weight = 0.0
+                exited = True
+                break
+
             if params.enable_profit_drawdown_exit and max_profit_pct > 0:
                 current_profit_pct = day_close / buy_price - 1.0
                 profit_drawdown_ratio = (max_profit_pct - current_profit_pct) / max_profit_pct
                 if profit_drawdown_ratio >= params.profit_drawdown_ratio:
-                    sell_price = day_close
-                    exit_type = "profit_drawdown_exit"
+                    fills.append(
+                        {
+                            "sell_date": str(day_date.date()),
+                            "sell_price": day_close,
+                            "weight": remaining_weight,
+                            "exit_type": "profit_drawdown_exit",
+                            "holding_days": holding_days,
+                        }
+                    )
                     triggered_profit_drawdown_ratio = float(profit_drawdown_ratio)
+                    remaining_weight = 0.0
+                    exited = True
+                    break
 
-            # 5) 均线趋势离场（可选，支持分批）
-            if sell_price is None and params.enable_ma_exit:
-                day_exit_ma = exit_ma_series.iloc[day_idx]
+            if params.enable_ma_exit:
+                day_exit_ma = legacy_ma_series.iloc[day_idx]
                 if pd.notna(day_exit_ma):
                     day_exit_ma_value = float(day_exit_ma)
                     triggered_exit_ma_value = day_exit_ma_value
                     if day_close < day_exit_ma_value:
-                        if remaining_weight > ma_batch_weight:
-                            # 先卖出一批，剩余仓位继续由后续规则管理。
-                            accumulated_sell_value += day_close * ma_batch_weight
-                            remaining_weight -= ma_batch_weight
-                            ma_batches_executed += 1
-                        else:
-                            # 最后一批卖出，交易闭环。
-                            sell_price = day_close
-                            exit_type = "ma_exit"
-                            ma_batches_executed += 1
+                        fills.append(
+                            {
+                                "sell_date": str(day_date.date()),
+                                "sell_price": day_close,
+                                "weight": remaining_weight,
+                                "exit_type": "ma_exit",
+                                "holding_days": holding_days,
+                            }
+                        )
+                        remaining_weight = 0.0
+                        exited = True
+                        break
 
-            # 6) 时间退出：仅在第 N 天检查一次，未达目标才退出；达标则继续由其他机制管理
-            if sell_price is None and not time_exit_checked and holding_days >= params.time_stop_days:
-                time_exit_checked = True
-                holding_return_at_n = day_close / buy_price - 1.0
-                if holding_return_at_n < params.time_stop_target_ratio:
-                    sell_price = day_close
-                    exit_type = "time_exit"
+        # 4) 时间退出（持续检查）
+        if remaining_weight > FLOAT_TOLERANCE and holding_days >= params.time_stop_days:
+            if day_close / buy_price - 1.0 < params.time_stop_target_ratio:
+                fills.append(
+                    {
+                        "sell_date": str(day_date.date()),
+                        "sell_price": day_close,
+                        "weight": remaining_weight,
+                        "exit_type": "time_exit",
+                        "holding_days": holding_days,
+                    }
+                )
+                remaining_weight = 0.0
+                exited = True
+                break
 
-        if sell_price is not None and exit_type is not None:
-            sell_day_idx = day_idx
-            sell_date = day_date
-            if params.enable_ma_exit and pd.isna(triggered_exit_ma_value):
-                day_exit_ma = exit_ma_series.iloc[day_idx]
-                if pd.notna(day_exit_ma):
-                    triggered_exit_ma_value = float(day_exit_ma)
-            break
+    # 5) 数据结束处理
+    if remaining_weight > FLOAT_TOLERANCE and not exited:
+        if params.time_exit_mode == "strict":
+            return None, "unclosed_trade"
+        if params.time_exit_mode == "force_close":
+            last_row = stock_df.iloc[-1]
+            last_date = pd.Timestamp(last_row["date"])
+            fills.append(
+                {
+                    "sell_date": str(last_date.date()),
+                    "sell_price": float(last_row["close"]),
+                    "weight": remaining_weight,
+                    "exit_type": "force_close",
+                    "holding_days": len(stock_df) - signal_idx - 1,
+                }
+            )
+            remaining_weight = 0.0
 
-    if sell_price is None or exit_type is None or sell_day_idx is None or sell_date is None:
+    if not fills:
         return None, "no_exit"
 
-    # 合并分批与最终卖出，得到整笔交易等效卖出价。
-    final_weight = remaining_weight
-    weighted_sell_price = (accumulated_sell_value + final_weight * sell_price) / 1.0
+    total_weight = sum(fill["weight"] for fill in fills)
+    if total_weight <= FLOAT_TOLERANCE:
+        return None, "no_exit"
+
+    weighted_sell_price = sum(fill["sell_price"] * fill["weight"] for fill in fills) / total_weight
+    last_fill = fills[-1]
+    sell_day_idx = signal_idx + int(last_fill["holding_days"])
 
     actual_buy_cost = buy_price * (1.0 + params.buy_cost_ratio)
     actual_sell_value = weighted_sell_price * (1.0 - params.sell_cost_ratio)
@@ -183,10 +308,12 @@ def simulate_trade(
         "volume": float(signal_row["volume"]) if pd.notna(signal_row["volume"]) else math.nan,
         "gap_pct_vs_prev_close": float(signal_row["gap_pct_vs_prev_close"]),
         "buy_price": buy_price,
+        "buy_date": str(buy_date.date()),
+        "fills": fills,
         "sell_price": float(weighted_sell_price),
-        "sell_date": sell_date.date(),
-        "exit_type": exit_type,
-        "holding_days": int(sell_day_idx - signal_idx),
+        "sell_date": last_fill["sell_date"],
+        "exit_type": "|".join(fill["exit_type"] for fill in fills),
+        "holding_days": int(last_fill["holding_days"]),
         "gross_return_pct": gross_return * 100.0,
         "net_return_pct": net_return * 100.0,
         "win_flag": 1 if net_return > 0 else 0,
