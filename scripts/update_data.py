@@ -70,7 +70,31 @@ def _merge_incremental(old_df: pd.DataFrame, new_df: pd.DataFrame) -> pd.DataFra
     return merged
 
 
-def update_one_symbol(symbol: str, start_date: str, end_date: str, adjust: str, local_root: Path) -> None:
+
+
+def _export_symbol_to_excel(symbol: str, adjust: str, local_root: Path) -> str | None:
+    parquet_path = local_root / adjust / f"{symbol}.parquet"
+    if not parquet_path.exists():
+        return None
+
+    export_dir = ROOT / "data" / "market" / "exports" / adjust
+    export_dir.mkdir(parents=True, exist_ok=True)
+    excel_path = export_dir / f"{symbol}.xlsx"
+
+    df = pd.read_parquet(parquet_path)
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df.to_excel(excel_path, index=False)
+    return str(excel_path)
+
+def update_one_symbol(
+    symbol: str,
+    start_date: str,
+    end_date: str,
+    adjust: str,
+    local_root: Path,
+    export_excel: bool,
+) -> None:
     standardized_symbol = AkshareProvider.to_standard_symbol(symbol)
     symbol_path = local_root / adjust / f"{standardized_symbol}.parquet"
     symbol_path.parent.mkdir(parents=True, exist_ok=True)
@@ -97,6 +121,8 @@ def update_one_symbol(symbol: str, start_date: str, end_date: str, adjust: str, 
 
         merged.to_parquet(symbol_path, index=False)
         rows = len(merged)
+        if export_excel:
+            _export_symbol_to_excel(standardized_symbol, adjust, local_root)
     except Exception as exc:  # noqa: BLE001
         status = "failed"
         error_message = str(exc)
@@ -130,6 +156,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--end-date", type=str, default=datetime.now().strftime("%Y%m%d"), help="结束日期")
     parser.add_argument("--adjust", type=str, default="", choices=["", "qfq", "hfq"], help="复权类型，默认读取配置")
     parser.add_argument("--refresh-symbols", action="store_true", help="先刷新股票列表 metadata")
+    parser.add_argument("--export-excel", action="store_true", help="更新完成后把对应 symbol 另存为 Excel")
     return parser.parse_args()
 
 
@@ -164,6 +191,7 @@ def main() -> None:
             end_date=end_date,
             adjust=adjust,
             local_root=local_root,
+            export_excel=bool(args.export_excel),
         )
 
 
