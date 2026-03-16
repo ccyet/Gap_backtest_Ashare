@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from io import BytesIO
 from pathlib import Path
+import subprocess
+import sys
 
 import pandas as pd
 import streamlit as st
@@ -170,9 +172,90 @@ def build_download_name(start_date: str, end_date: str) -> str:
     return f"gap_analysis_{start_date}_{end_date}.xlsx"
 
 
+def run_local_data_update(
+    symbols_text: str,
+    start_date: str,
+    end_date: str,
+    adjust: str,
+    refresh_symbols: bool,
+) -> tuple[bool, str]:
+    cmd = [
+        sys.executable,
+        "scripts/update_data.py",
+        "--start-date",
+        start_date,
+        "--end-date",
+        end_date,
+    ]
+    if adjust:
+        cmd.extend(["--adjust", adjust])
+    if symbols_text.strip():
+        cmd.extend(["--symbols", symbols_text.strip()])
+    if refresh_symbols:
+        cmd.append("--refresh-symbols")
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    output = (result.stdout or "") + ("\n" + result.stderr if result.stderr else "")
+    return result.returncode == 0, output.strip()
+
+
+def load_update_log_preview(limit: int = 20) -> pd.DataFrame:
+    log_file = Path("data/market/metadata/update_log.parquet")
+    if not log_file.exists():
+        return pd.DataFrame(columns=["symbol", "adjust", "start_date", "end_date", "rows", "updated_at", "status", "error_message"])
+    try:
+        df = pd.read_parquet(log_file)
+    except Exception:
+        return pd.DataFrame(columns=["symbol", "adjust", "start_date", "end_date", "rows", "updated_at", "status", "error_message"])
+
+    if "updated_at" in df.columns:
+        df["updated_at"] = pd.to_datetime(df["updated_at"], errors="coerce")
+        df = df.sort_values("updated_at", ascending=False)
+    return df.head(limit).reset_index(drop=True)
+
+
 st.title("跳空统计分析工具")
 st.caption("用于统计指定时间范围内，满足跳空条件的股票，在统一买卖规则下的表现。")
 st.info("当前按单账户、单持仓回测：一笔买入对应一笔卖出，卖出前不会再次买入。净值曲线按已平仓结果累计，持仓期间净值保持不变。")
+
+with st.expander("本地行情更新（离线下载）", expanded=False):
+    st.caption("这里是数据爬取入口：点击按钮会调用 `scripts/update_data.py` 下载并更新本地 parquet，不会在回测逻辑中直接调用 akshare。")
+    with st.form("offline_update_form"):
+        update_col_1, update_col_2, update_col_3 = st.columns(3)
+        with update_col_1:
+            update_symbols = st.text_area(
+                "更新股票代码（可选）",
+                value="",
+                help="留空表示按 symbols.parquet 全量更新；多个代码用逗号分隔，格式如 000001.SZ,600519.SH。",
+            )
+        with update_col_2:
+            update_start = st.date_input("更新开始日期", value=pd.Timestamp.today().date() - pd.Timedelta(days=30), key="update_start")
+            update_end = st.date_input("更新结束日期", value=pd.Timestamp.today().date(), key="update_end")
+        with update_col_3:
+            update_adjust = st.selectbox("复权类型", options=["qfq", "hfq"], index=0)
+            refresh_symbol_meta = st.checkbox("先刷新股票列表", value=False)
+
+        update_submitted = st.form_submit_button("开始更新本地数据")
+
+    if update_submitted:
+        success, log_text = run_local_data_update(
+            symbols_text=update_symbols,
+            start_date=update_start.strftime("%Y-%m-%d"),
+            end_date=update_end.strftime("%Y-%m-%d"),
+            adjust=update_adjust,
+            refresh_symbols=bool(refresh_symbol_meta),
+        )
+        if success:
+            st.success("本地数据更新完成。")
+        else:
+            st.error("本地数据更新失败，请查看下方日志。")
+        if log_text:
+            st.code(log_text)
+
+    log_preview_df = load_update_log_preview(limit=20)
+    if not log_preview_df.empty:
+        st.markdown("**最近 20 条更新日志**")
+        dataframe_stretch(log_preview_df, hide_index=True)
 
 with st.expander("数据格式说明（建议先看）", expanded=False):
     st.markdown(
