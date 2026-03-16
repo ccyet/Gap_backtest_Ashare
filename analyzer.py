@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+import json
 
 import pandas as pd
 
@@ -31,6 +32,9 @@ BASE_DETAIL_COLUMNS = [
     "max_profit_pct",
     "exit_ma_value",
     "profit_drawdown_ratio",
+    "fills",
+    "fill_count",
+    "fill_detail_json",
 ]
 
 DETAIL_COLUMNS = BASE_DETAIL_COLUMNS + [
@@ -65,7 +69,7 @@ def _empty_scan_stats() -> dict[str, int]:
         "signal_count": 0,
         "closed_trade_candidates": 0,
         "skipped_insufficient_future": 0,
-        "skipped_time_target_met": 0,
+        "skipped_unclosed_trade": 0,
         "skipped_no_exit": 0,
     }
 
@@ -109,12 +113,23 @@ def scan_trade_candidates(all_data: pd.DataFrame, params: AnalysisParams) -> tup
             if trade is None:
                 if skip_reason == "insufficient_future":
                     stats["skipped_insufficient_future"] += 1
-                elif skip_reason == "time_target_met":
-                    stats["skipped_time_target_met"] += 1
+                elif skip_reason == "unclosed_trade":
+                    stats["skipped_unclosed_trade"] += 1
                 else:
                     stats["skipped_no_exit"] += 1
                 continue
 
+            fills = trade.get("fills", [])
+            total_weight = sum(float(fill.get("weight", 0.0)) for fill in fills)
+            if total_weight <= 0:
+                stats["skipped_no_exit"] += 1
+                continue
+            trade["sell_price"] = sum(float(fill["sell_price"]) * float(fill["weight"]) for fill in fills) / total_weight
+            trade["sell_date"] = fills[-1]["sell_date"]
+            trade["exit_type"] = "+".join(str(fill["exit_type"]) for fill in fills)
+            trade["gross_return_pct"] = (trade["sell_price"] / float(trade["buy_price"]) - 1.0) * 100.0
+            trade["fill_count"] = len(fills)
+            trade["fill_detail_json"] = json.dumps(fills, ensure_ascii=False)
             detail_records.append(trade)
             stats["closed_trade_candidates"] += 1
 
