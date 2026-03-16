@@ -15,13 +15,11 @@ class AkshareProvider:
         if not symbol:
             raise ValueError("symbol 不能为空")
 
-        # 已是标准格式：000001.SZ / 600519.SH
         if "." in symbol:
             code, market = symbol.split(".", 1)
             if len(code) == 6 and market in {"SZ", "SH", "BJ"}:
                 return f"{code}.{market}"
 
-        # 兼容 AKShare 常见格式：sz000001 / sh600519
         if symbol.startswith("SZ") and len(symbol) == 8 and symbol[2:].isdigit():
             return f"{symbol[2:]}.SZ"
         if symbol.startswith("SH") and len(symbol) == 8 and symbol[2:].isdigit():
@@ -29,7 +27,6 @@ class AkshareProvider:
         if symbol.startswith("BJ") and len(symbol) == 8 and symbol[2:].isdigit():
             return f"{symbol[2:]}.BJ"
 
-        # 仅 6 位数字时，按主板常见规则兜底映射
         if len(symbol) == 6 and symbol.isdigit():
             if symbol.startswith(("5", "6", "9")):
                 return f"{symbol}.SH"
@@ -42,9 +39,58 @@ class AkshareProvider:
 
     @staticmethod
     def to_akshare_symbol(standard_symbol: str) -> str:
-        # stock_zh_a_hist 的 symbol 参数是 6 位数字代码（例如 000001 / 600519）
+        # 东财源 stock_zh_a_hist 使用 6 位代码
         code, _market = AkshareProvider.to_standard_symbol(standard_symbol).split(".", 1)
         return code
+
+    @staticmethod
+    def to_akshare_prefixed_symbol(standard_symbol: str) -> str:
+        # 新浪/腾讯常用 sz000001 / sh600519
+        code, market = AkshareProvider.to_standard_symbol(standard_symbol).split(".", 1)
+        return f"{market.lower()}{code}"
+
+    @staticmethod
+    def _empty_bars() -> pd.DataFrame:
+        return pd.DataFrame(columns=["date", "symbol", "open", "high", "low", "close", "volume", "amount"])
+
+    @staticmethod
+    def _normalize_bars(raw_df: pd.DataFrame, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+        if raw_df.empty:
+            return AkshareProvider._empty_bars()
+
+        mapping = {
+            "日期": "date",
+            "开盘": "open",
+            "最高": "high",
+            "最低": "low",
+            "收盘": "close",
+            "成交量": "volume",
+            "成交额": "amount",
+            "date": "date",
+            "open": "open",
+            "high": "high",
+            "low": "low",
+            "close": "close",
+            "volume": "volume",
+            "amount": "amount",
+        }
+
+        out = raw_df.rename(columns=mapping).copy()
+        if "date" not in out.columns:
+            out = out.reset_index()
+            out = out.rename(columns={out.columns[0]: "date"})
+
+        out["date"] = pd.to_datetime(out["date"], errors="coerce")
+        start_ts = pd.to_datetime(start_date)
+        end_ts = pd.to_datetime(end_date)
+        out = out[out["date"].between(start_ts, end_ts)]
+
+        for required in ["open", "high", "low", "close", "volume", "amount"]:
+            if required not in out.columns:
+                out[required] = pd.NA
+
+        out["symbol"] = AkshareProvider.to_standard_symbol(symbol)
+        return out[["date", "symbol", "open", "high", "low", "close", "volume", "amount"]].reset_index(drop=True)
 
     @staticmethod
     def fetch_symbol_list() -> pd.DataFrame:
@@ -59,40 +105,80 @@ class AkshareProvider:
         return renamed[["symbol", "name"]].drop_duplicates(subset=["symbol"]).reset_index(drop=True)
 
     @staticmethod
-    def fetch_daily_bars(symbol: str, start_date: str, end_date: str, adjust: str = "qfq") -> pd.DataFrame:
-        import akshare as ak
+    def _fetch_from_sina(ak: object, symbol: str, start_date: str, end_date: str, adjust: str) -> pd.DataFrame:
+        prefixed = AkshareProvider.to_akshare_prefixed_symbol(symbol)
+        if not hasattr(ak, "stock_zh_a_daily"):
+            raise AttributeError("akshare 不存在 stock_zh_a_daily")
+        func = getattr(ak, "stock_zh_a_daily")
+        return func(
+            symbol=prefixed,
+            start_date=pd.to_datetime(start_date).strftime("%Y%m%d"),
+            end_date=pd.to_datetime(end_date).strftime("%Y%m%d"),
+            adjust=adjust,
+        )
 
-        ak_symbol = AkshareProvider.to_akshare_symbol(symbol)
-        raw_df = ak.stock_zh_a_hist(
-            symbol=ak_symbol,
+    @staticmethod
+    def _fetch_from_tencent(ak: object, symbol: str, start_date: str, end_date: str, adjust: str) -> pd.DataFrame:
+        prefixed = AkshareProvider.to_akshare_prefixed_symbol(symbol)
+        for name in ["stock_zh_a_hist_tx", "stock_zh_a_daily_tx"]:
+            if not hasattr(ak, name):
+                continue
+            func = getattr(ak, name)
+            # 兼容不同版本签名
+            for kwargs in (
+                {
+                    "symbol": prefixed,
+                    "start_date": pd.to_datetime(start_date).strftime("%Y%m%d"),
+                    "end_date": pd.to_datetime(end_date).strftime("%Y%m%d"),
+                    "adjust": adjust,
+                },
+                {
+                    "symbol": prefixed,
+                    "start_date": pd.to_datetime(start_date).strftime("%Y%m%d"),
+                    "end_date": pd.to_datetime(end_date).strftime("%Y%m%d"),
+                },
+            ):
+                try:
+                    return func(**kwargs)
+                except TypeError:
+                    continue
+        raise AttributeError("akshare 不存在可用腾讯源接口")
+
+    @staticmethod
+    def _fetch_from_eastmoney(ak: object, symbol: str, start_date: str, end_date: str, adjust: str) -> pd.DataFrame:
+        if not hasattr(ak, "stock_zh_a_hist"):
+            raise AttributeError("akshare 不存在 stock_zh_a_hist")
+
+        return ak.stock_zh_a_hist(
+            symbol=AkshareProvider.to_akshare_symbol(symbol),
             period="daily",
             start_date=pd.to_datetime(start_date).strftime("%Y%m%d"),
             end_date=pd.to_datetime(end_date).strftime("%Y%m%d"),
             adjust=adjust,
         )
-        if raw_df.empty:
-            return pd.DataFrame(columns=["date", "symbol", "open", "high", "low", "close", "volume", "amount"])
 
-        # AKShare中文列名映射
-        mapping = {
-            "日期": "date",
-            "开盘": "open",
-            "最高": "high",
-            "最低": "low",
-            "收盘": "close",
-            "成交量": "volume",
-            "成交额": "amount",
-        }
-        out = raw_df.rename(columns=mapping).copy()
-        out["symbol"] = AkshareProvider.to_standard_symbol(symbol)
+    @staticmethod
+    def fetch_daily_bars(symbol: str, start_date: str, end_date: str, adjust: str = "qfq") -> pd.DataFrame:
+        import akshare as ak
 
-        for required in ["date", "open", "high", "low", "close"]:
-            if required not in out.columns:
-                out[required] = pd.NA
+        errors: list[str] = []
+        sources = [
+            ("sina", AkshareProvider._fetch_from_sina),
+            ("tencent", AkshareProvider._fetch_from_tencent),
+            ("eastmoney", AkshareProvider._fetch_from_eastmoney),
+        ]
 
-        if "volume" not in out.columns:
-            out["volume"] = pd.NA
-        if "amount" not in out.columns:
-            out["amount"] = pd.NA
+        for source_name, fetcher in sources:
+            try:
+                raw_df = fetcher(ak, symbol, start_date, end_date, adjust)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{source_name}: {exc}")
+                continue
 
-        return out[["date", "symbol", "open", "high", "low", "close", "volume", "amount"]]
+            normalized = AkshareProvider._normalize_bars(raw_df, symbol, start_date, end_date)
+            if not normalized.empty:
+                return normalized
+
+        if errors:
+            raise RuntimeError("日线下载失败，已尝试新浪->腾讯->东财: " + " | ".join(errors))
+        return AkshareProvider._empty_bars()
