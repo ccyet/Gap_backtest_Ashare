@@ -14,7 +14,20 @@ from models import AnalysisParams, PartialExitRule, normalize_column_overrides, 
 
 st.set_page_config(page_title="跳空统计分析工具", layout="wide")
 
+RESULT_STATE_KEYS = [
+    "detail_df",
+    "daily_df",
+    "equity_df",
+    "stats",
+    "excel_bytes",
+    "download_name",
+]
 
+DETAIL_PRICE_COLUMNS = ["prev_close", "prev_high", "prev_low", "open", "close", "buy_price", "sell_price", "exit_ma_value"]
+DETAIL_PERCENT_COLUMNS = ["gap_pct_vs_prev_close", "gross_return_pct", "net_return_pct", "mfe_pct", "mae_pct", "max_profit_pct", "profit_drawdown_ratio"]
+DETAIL_NAV_COLUMNS = ["nav_before_trade", "nav_after_trade"]
+SUMMARY_PERCENT_COLUMNS = ["win_rate_pct", "avg_net_return_pct", "median_net_return_pct"]
+EQUITY_PERCENT_COLUMNS = ["drawdown_pct"]
 
 
 def dataframe_stretch(data: object, *, hide_index: bool = False) -> None:
