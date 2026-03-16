@@ -42,8 +42,9 @@ class AkshareProvider:
 
     @staticmethod
     def to_akshare_symbol(standard_symbol: str) -> str:
-        code, market = AkshareProvider.to_standard_symbol(standard_symbol).split(".", 1)
-        return f"{market.lower()}{code}"
+        # stock_zh_a_hist 的 symbol 参数是 6 位数字代码（例如 000001 / 600519）
+        code, _market = AkshareProvider.to_standard_symbol(standard_symbol).split(".", 1)
+        return code
 
     @staticmethod
     def fetch_symbol_list() -> pd.DataFrame:

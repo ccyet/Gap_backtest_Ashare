@@ -42,3 +42,8 @@ def test_load_daily_bars_filters_and_sorts(monkeypatch, tmp_path: Path):
 
     result = local_data_service.load_daily_bars("000001.SZ", "2024-01-02", "2024-01-03", adjust="qfq")
     assert result["date"].dt.strftime("%Y-%m-%d").tolist() == ["2024-01-02", "2024-01-03"]
+
+
+def test_akshare_symbol_format_for_hist_api():
+    assert AkshareProvider.to_akshare_symbol("000001.SZ") == "000001"
+    assert AkshareProvider.to_akshare_symbol("600519.SH") == "600519"

@@ -221,7 +221,7 @@ st.title("跳空统计分析工具")
 st.caption("用于统计指定时间范围内，满足跳空条件的股票，在统一买卖规则下的表现。")
 st.info("当前按单账户、单持仓回测：一笔买入对应一笔卖出，卖出前不会再次买入。净值曲线按已平仓结果累计，持仓期间净值保持不变。")
 
-with st.expander("本地行情更新（离线下载）", expanded=False):
+with st.expander("本地行情更新（离线下载）", expanded=True):
     st.caption("这里是数据爬取入口：点击按钮会调用 `scripts/update_data.py` 下载并更新本地 parquet，不会在回测逻辑中直接调用 akshare。")
     st.caption("可选：更新完成后自动导出 Excel 版本，便于人工核对。")
     with st.form("offline_update_form"):
@@ -240,7 +240,8 @@ with st.expander("本地行情更新（离线下载）", expanded=False):
             refresh_symbol_meta = st.checkbox("先刷新股票列表", value=False)
             export_excel_after_update = st.checkbox("更新后另存为 Excel", value=False, help="会在 data/market/exports/{adjust}/ 下生成每只股票的 xlsx 文件。")
 
-        update_submitted = st.form_submit_button("开始更新本地数据")
+        st.caption("填写参数后点击下方按钮执行离线更新")
+        update_submitted = form_submit_button_stretch("开始更新本地数据")
 
     if update_submitted:
         success, log_text = run_local_data_update(
