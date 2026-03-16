@@ -1,0 +1,3 @@
+data_source: local_parquet
+local_data_root: data/market/daily
+default_adjust: qfq
