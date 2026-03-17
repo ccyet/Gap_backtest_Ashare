@@ -82,6 +82,8 @@ class AnalysisParams:
     buy_cost_pct: float
     sell_cost_pct: float
     time_exit_mode: str
+    local_data_root: str = "data/market/daily"
+    adjust: str = "qfq"
 
     @property
     def gap_ratio(self) -> float:
@@ -148,7 +150,7 @@ def validate_params(params: AnalysisParams) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     warnings: list[str] = []
 
-    if params.data_source_type not in {"sqlite", "file"}:
+    if params.data_source_type not in {"sqlite", "file", "local_parquet"}:
         errors.append("数据来源类型不合法。")
 
     if params.data_source_type == "sqlite" and not params.db_path.strip():
@@ -159,6 +161,9 @@ def validate_params(params: AnalysisParams) -> tuple[list[str], list[str]]:
 
     if params.time_exit_mode not in {"strict", "force_close"}:
         errors.append("时间到期处理方式不合法。")
+
+    if params.adjust not in {"qfq", "hfq"}:
+        errors.append("复权方式只能为 qfq 或 hfq。")
 
     if params.gap_pct < 0:
         errors.append("跳空幅度不能为负数。")

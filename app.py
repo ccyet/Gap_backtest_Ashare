@@ -220,12 +220,48 @@ def load_update_log_preview(limit: int = 20) -> pd.DataFrame:
 
 st.title("Gap_test 回测系统")
 
+with st.expander("本地行情更新（离线下载）", expanded=True):
+    st.caption("推荐路径：先离线更新本地 parquet，再进行回测。")
+    up_c1, up_c2, up_c3 = st.columns(3)
+    with up_c1:
+        update_symbols = st.text_area("股票代码（可选）", value="", help="多个代码用逗号分隔，空表示全量。")
+    with up_c2:
+        update_start = st.date_input("更新开始日期", value=(pd.Timestamp.today().date() - pd.Timedelta(days=30)), key="offline_update_start")
+        update_end = st.date_input("更新结束日期", value=pd.Timestamp.today().date(), key="offline_update_end")
+    with up_c3:
+        update_adjust = st.selectbox("更新复权方式", options=["qfq", "hfq"], index=0, key="offline_update_adjust")
+        refresh_symbol_meta = st.checkbox("刷新股票列表", value=False, key="offline_update_refresh")
+        export_excel_after_update = st.checkbox("更新后另存为 Excel", value=False, key="offline_update_export")
+
+    if st.button("开始更新本地数据", key="offline_update_submit"):
+        ok, output = run_local_data_update(
+            symbols_text=update_symbols,
+            start_date=update_start.strftime("%Y-%m-%d"),
+            end_date=update_end.strftime("%Y-%m-%d"),
+            adjust=update_adjust,
+            refresh_symbols=bool(refresh_symbol_meta),
+            export_excel=bool(export_excel_after_update),
+        )
+        if ok:
+            st.success("本地数据更新完成")
+        else:
+            st.error("本地数据更新失败")
+        st.caption(f"导出目录：data/market/exports/{update_adjust}/")
+        if output:
+            st.code(output)
+
+    preview = load_update_log_preview(limit=20)
+    if not preview.empty:
+        st.markdown("**最近更新日志**")
+        st.dataframe(preview, hide_index=True)
+
 # ===== Sidebar: 基础参数 =====
 st.sidebar.header("基础参数")
 stock_scope_text = st.sidebar.text_area("股票池", value="", help="多个代码可用逗号/空格/换行。留空表示全市场。")
 start_date = st.sidebar.date_input("回测开始", value=(pd.Timestamp.today().date() - pd.Timedelta(days=365)))
 end_date = st.sidebar.date_input("回测结束", value=pd.Timestamp.today().date())
-data_source_label = st.sidebar.selectbox("数据源", options=["Excel/CSV 文件", "SQLite 数据库"])
+SOURCE_LABEL_TO_TYPE = {"本地 Parquet（AKShare 离线）": "local_parquet", "Excel/CSV 文件": "file", "SQLite 数据库": "sqlite"}
+data_source_label = st.sidebar.selectbox("数据源", options=list(SOURCE_LABEL_TO_TYPE.keys()))
 adjust_label = st.sidebar.selectbox("复权方式", options=["qfq", "hfq"], index=0)
 submitted = st.sidebar.button("开始回测", type="primary")
 
@@ -237,13 +273,16 @@ input_file_path = ""
 excel_sheet_name = ""
 uploaded_market_file = None
 
+local_data_root = st.sidebar.text_input("本地 Parquet 根目录", value="data/market/daily")
 if data_source_label == "SQLite 数据库":
     db_path = st.sidebar.text_input("SQLite 路径", value=default_db_path)
     table_name = st.sidebar.text_input("表名（可选）", value="")
-else:
+elif data_source_label == "Excel/CSV 文件":
     uploaded_market_file = st.sidebar.file_uploader("上传行情文件", type=["xlsx", "xlsm", "csv"])
     input_file_path = st.sidebar.text_input("或本地文件路径（可选）", value="")
     excel_sheet_name = st.sidebar.text_input("工作表（Excel 可选）", value="")
+else:
+    st.sidebar.caption("当前使用本地 parquet 数据源，回测将直接读取本地目录。")
 
 # ===== 主界面：配置摘要 =====
 st.subheader("当前配置摘要")
@@ -254,7 +293,7 @@ summary_cols[2].info(f"区间: {start_date} ~ {end_date}")
 summary_cols_2 = st.columns(3)
 summary_cols_2[0].info(f"复权: {adjust_label}")
 summary_cols_2[1].info(f"分批退出: {'开启' if st.session_state.get('partial_exit_enabled', False) else '关闭'}")
-summary_cols_2[2].info(f"时间退出: {'开启' if st.session_state.get('use_time_stop', True) else '开启'}")
+summary_cols_2[2].info(f"时间退出: {'开启' if st.session_state.get('use_time_stop', True) else '关闭'}")
 
 # ===== 主界面：规则配置 =====
 with st.expander("⚙️ 核心交易规则配置", expanded=True):
@@ -327,7 +366,7 @@ with st.expander("字段映射（可选）", expanded=False):
 
 if submitted:
     clear_result_state()
-    source_type = "file" if data_source_label == "Excel/CSV 文件" else "sqlite"
+    source_type = SOURCE_LABEL_TO_TYPE[data_source_label]
     uploaded_file_bytes = uploaded_market_file.getvalue() if uploaded_market_file is not None else None
     uploaded_file_name = uploaded_market_file.name if uploaded_market_file is not None else None
 
@@ -372,6 +411,8 @@ if submitted:
         buy_cost_pct=float(buy_cost_pct),
         sell_cost_pct=float(sell_cost_pct),
         time_exit_mode="strict" if time_exit_mode_label == "按原规则剔除未达条件信号" else "force_close",
+        local_data_root=str(local_data_root),
+        adjust=str(adjust_label),
     )
 
     errors, warnings = validate_params(params)
@@ -408,6 +449,8 @@ if submitted:
                     file_bytes=uploaded_file_bytes,
                     file_name=uploaded_file_name,
                     sheet_name=params.excel_sheet_name,
+                    local_data_root=params.local_data_root,
+                    adjust=params.adjust,
                 )
                 detail_df, daily_df, equity_df, stats = analyze_all_stocks(all_data, params)
                 excel_bytes = export_to_excel_bytes(detail_df, daily_df, equity_df)

@@ -203,20 +203,14 @@ def build_equity_curve(all_data: pd.DataFrame, strategy_df: pd.DataFrame, params
     start_ts = pd.to_datetime(params.start_date)
     end_ts = pd.to_datetime(params.end_date)
 
-    market_dates: list[pd.Timestamp]
-    if not all_data.empty:
-        market_dates = sorted(
-            timestamp
-            for timestamp in pd.to_datetime(all_data["date"]).dropna().unique().tolist()
-            if start_ts <= pd.Timestamp(timestamp) <= end_ts
-        )
-    else:
-        market_dates = [start_ts]
-
-    if not market_dates:
-        market_dates = [start_ts]
-
     if strategy_df.empty:
+        market_dates = [start_ts]
+        if not all_data.empty:
+            market_dates = sorted(
+                timestamp
+                for timestamp in pd.to_datetime(all_data["date"]).dropna().unique().tolist()
+                if start_ts <= pd.Timestamp(timestamp) <= end_ts
+            ) or [start_ts]
         equity_df = pd.DataFrame(
             {
                 "date": market_dates,
@@ -229,8 +223,20 @@ def build_equity_curve(all_data: pd.DataFrame, strategy_df: pd.DataFrame, params
         )
         return equity_df[EQUITY_COLUMNS]
 
-    # 价格查找表，用于持仓期间逐日盯市净值
-    close_lookup = {}
+    last_exit_ts = pd.to_datetime(strategy_df["sell_date"]).max()
+    curve_end = max(end_ts, last_exit_ts)
+
+    market_dates: list[pd.Timestamp] = []
+    if not all_data.empty:
+        market_dates = sorted(
+            timestamp
+            for timestamp in pd.to_datetime(all_data["date"]).dropna().unique().tolist()
+            if start_ts <= pd.Timestamp(timestamp) <= curve_end
+        )
+    if not market_dates:
+        market_dates = list(pd.date_range(start=start_ts, end=curve_end, freq="D"))
+
+    close_lookup: dict[tuple[str, pd.Timestamp], float] = {}
     if not all_data.empty:
         for row in all_data[["stock_code", "date", "close"]].dropna().itertuples(index=False):
             close_lookup[(str(row.stock_code), pd.Timestamp(row.date).normalize())] = float(row.close)
@@ -242,10 +248,14 @@ def build_equity_curve(all_data: pd.DataFrame, strategy_df: pd.DataFrame, params
 
     current_nav = 1.0
     curve_records: list[dict] = []
-
-    buy_cost_ratio = params.buy_cost_ratio
-    sell_cost_ratio = params.sell_cost_ratio
     direction = "long" if params.gap_direction == "up" else "short"
+
+    trade_state = {
+        "remaining_weight": 0.0,
+        "realized_value": 0.0,
+        "fills": [],
+        "fill_idx": 0,
+    }
 
     for market_date in market_dates:
         current_date = pd.Timestamp(market_date).normalize()
@@ -255,10 +265,14 @@ def build_equity_curve(all_data: pd.DataFrame, strategy_df: pd.DataFrame, params
 
         if active_trade is None and trade_index < len(trades):
             next_trade = trades[trade_index]
-            next_buy_date = pd.Timestamp(next_trade["date"]).normalize()
-            if current_date >= next_buy_date:
+            buy_date = pd.Timestamp(next_trade["date"]).normalize()
+            if current_date >= buy_date:
                 active_trade = next_trade
                 active_last_close = None
+                trade_state["remaining_weight"] = 1.0
+                trade_state["realized_value"] = 0.0
+                trade_state["fills"] = list(active_trade.get("fills", []))
+                trade_state["fill_idx"] = 0
                 event_label = "buy"
                 event_trade_no = int(active_trade["trade_no"])
                 event_stock_code = str(active_trade["stock_code"])
@@ -273,18 +287,41 @@ def build_equity_curve(all_data: pd.DataFrame, strategy_df: pd.DataFrame, params
             if day_close is not None:
                 active_last_close = day_close
 
-            if current_date < sell_date:
-                if day_close is not None:
-                    if direction == "short":
-                        unrealized_net_return = (buy_price - day_close * (1.0 - sell_cost_ratio)) / (buy_price * (1.0 + buy_cost_ratio))
-                    else:
-                        unrealized_net_return = (day_close * (1.0 - sell_cost_ratio)) / (buy_price * (1.0 + buy_cost_ratio)) - 1.0
-                    current_nav = nav_before_trade * (1.0 + unrealized_net_return)
-            else:
-                current_nav = float(active_trade["nav_after_trade"])
-                event_label = str(active_trade["exit_type"]) if not event_label else f"{event_label}+{active_trade['exit_type']}"
+            # 按 fill 顺序处理当日成交
+            while trade_state["fill_idx"] < len(trade_state["fills"]):
+                fill = trade_state["fills"][trade_state["fill_idx"]]
+                fill_date = pd.to_datetime(fill["sell_date"]).normalize()
+                if fill_date != current_date:
+                    break
+                fill_weight = float(fill["weight"])
+                fill_price = float(fill["sell_price"])
+                trade_state["realized_value"] += fill_weight * fill_price
+                trade_state["remaining_weight"] -= fill_weight
+                fill_exit = str(fill.get("exit_type", "fill"))
+                event_label = fill_exit if not event_label else f"{event_label}+{fill_exit}"
                 event_trade_no = int(active_trade["trade_no"])
                 event_stock_code = stock_code
+                trade_state["fill_idx"] += 1
+
+            if day_close is not None:
+                remaining_weight = max(0.0, float(trade_state["remaining_weight"]))
+                realized_value = float(trade_state["realized_value"])
+
+                if direction == "short":
+                    effective_cover = realized_value + remaining_weight * day_close
+                    holding_return = (buy_price - effective_cover) / buy_price
+                else:
+                    marked_value = realized_value + remaining_weight * day_close
+                    holding_return = marked_value / buy_price - 1.0
+
+                current_nav = nav_before_trade * (1.0 + holding_return)
+
+            if current_date >= sell_date and trade_state["remaining_weight"] <= 1e-12:
+                current_nav = float(active_trade["nav_after_trade"])
+                if not event_label:
+                    event_label = str(active_trade["exit_type"])
+                    event_trade_no = int(active_trade["trade_no"])
+                    event_stock_code = stock_code
                 active_trade = None
                 active_last_close = None
                 trade_index += 1
@@ -292,7 +329,7 @@ def build_equity_curve(all_data: pd.DataFrame, strategy_df: pd.DataFrame, params
         curve_records.append(
             {
                 "date": pd.Timestamp(current_date),
-                "net_value": current_nav,
+                "net_value": float(current_nav),
                 "trade_no": event_trade_no,
                 "stock_code": event_stock_code,
                 "event": event_label,
