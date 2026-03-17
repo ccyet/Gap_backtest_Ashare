@@ -223,7 +223,7 @@ st.title("Gap_test 回测系统")
 # ===== Sidebar: 基础参数 =====
 st.sidebar.header("基础参数")
 stock_scope_text = st.sidebar.text_area("股票池", value="", help="多个代码可用逗号/空格/换行。留空表示全市场。")
-start_date = st.sidebar.date_input("回测开始", value=(pd.Timestamp.today().date() - pd.Timedelta(days=365)).date())
+start_date = st.sidebar.date_input("回测开始", value=(pd.Timestamp.today().date() - pd.Timedelta(days=365)))
 end_date = st.sidebar.date_input("回测结束", value=pd.Timestamp.today().date())
 data_source_label = st.sidebar.selectbox("数据源", options=["Excel/CSV 文件", "SQLite 数据库"])
 adjust_label = st.sidebar.selectbox("复权方式", options=["qfq", "hfq"], index=0)
