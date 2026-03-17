@@ -109,7 +109,8 @@ def scan_trade_candidates(all_data: pd.DataFrame, params: AnalysisParams) -> tup
         stats["signal_count"] += len(signal_indices)
 
         for signal_idx in signal_indices:
-            trade, skip_reason = simulate_trade(enriched, signal_idx, params)
+            direction = "long" if params.gap_direction == "up" else "short"
+            trade, skip_reason = simulate_trade(enriched, signal_idx, params, direction=direction)
             if trade is None:
                 if skip_reason == "insufficient_future":
                     stats["skipped_insufficient_future"] += 1

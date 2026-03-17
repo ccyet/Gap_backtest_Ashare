@@ -146,6 +146,7 @@ python scripts/update_data.py --start-date 2024-01-01 --end-date 2024-12-31 --ad
 - 单账户、单持仓
 - 持仓期间不重复开仓
 - 平仓后才释放仓位
+- 支持 long / short 的研究型镜像回测；short 仅用于研究，不代表 A 股可直接实盘融券交易。
 
 ## 7.2 退出优先级（日内）
 1. 全仓止损
@@ -226,3 +227,23 @@ pytest -q
 - 如果你要改下载逻辑，请只改 `data/providers/` 和 `scripts/update_data.py`。
 - 如果你要改策略逻辑，请集中在 `rules.py` / `analyzer.py` / `models.py`。
 - 任何情况下，都尽量保持“下载与回测解耦”。
+
+
+---
+
+## 12. 主题配置（含暗色主题）
+
+本项目不在 `app.py` 内动态切主题。
+
+如需暗色主题，请在项目根目录新建：` .streamlit/config.toml `，示例：
+
+```toml
+[theme]
+base="dark"
+primaryColor="#4f8bf9"
+backgroundColor="#0e1117"
+secondaryBackgroundColor="#262730"
+textColor="#fafafa"
+```
+
+保存后重启 `streamlit run app.py` 生效。

@@ -209,3 +209,17 @@ def test_partial_case_l_drawdown_uses_updated_trailing_peak():
     assert trade["fills"][-1]["exit_type"] == "profit_drawdown"
     assert trade["fills"][-1]["holding_days"] == 3
     assert trade["fills"][-1]["sell_price"] == 96
+
+
+def test_short_stop_loss_mirror():
+    df = make_stock_df([(100, 101, 99, 100), (100, 106, 99, 105), (105, 106, 104, 105)])
+    trade, reason = simulate_trade(df, 0, make_params(enable_take_profit=False, stop_loss_pct=5.0), direction="short")
+    assert reason is None
+    assert trade["fills"][-1]["exit_type"] == "stop_loss"
+
+
+def test_short_fixed_tp_mirror():
+    df = make_stock_df([(100, 101, 99, 100), (100, 101, 94, 95), (95, 96, 94, 95)])
+    trade, reason = simulate_trade(df, 0, make_params(enable_take_profit=True, take_profit_pct=5.0, stop_loss_pct=50.0), direction="short")
+    assert reason is None
+    assert trade["fills"][-1]["exit_type"] == "take_profit"
