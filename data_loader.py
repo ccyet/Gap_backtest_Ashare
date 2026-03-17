@@ -492,6 +492,83 @@ def load_stock_data(
     )
 
 
+
+
+def _list_local_symbols(local_data_root: Path, adjust: str) -> list[str]:
+    metadata_path = local_data_root.parent / "metadata" / "symbols.parquet"
+    if metadata_path.exists():
+        try:
+            meta = pd.read_parquet(metadata_path)
+            if "symbol" in meta.columns:
+                values = meta["symbol"].astype(str).str.strip().str.upper().tolist()
+                return sorted([item for item in values if item])
+        except Exception:
+            pass
+
+    adjust_dir = local_data_root / adjust
+    if not adjust_dir.exists():
+        return []
+    return sorted(path.stem.upper() for path in adjust_dir.glob("*.parquet"))
+
+
+def load_local_parquet_data(
+    start_date: str,
+    end_date: str,
+    stock_codes: tuple[str, ...] | None = None,
+    lookback_days: int = 0,
+    lookahead_days: int = 0,
+    local_data_root: str = "data/market/daily",
+    adjust: str = "qfq",
+) -> pd.DataFrame:
+    root = Path(local_data_root)
+    adjust_dir = root / adjust
+    if not adjust_dir.exists():
+        raise FileNotFoundError(f"本地数据目录不存在：{adjust_dir}")
+
+    normalized_codes = tuple(code.strip().upper() for code in (stock_codes or ()) if code.strip())
+    symbols = list(normalized_codes) if normalized_codes else _list_local_symbols(root, adjust)
+    if not symbols:
+        raise ValueError("本地 parquet 未找到可用股票数据。")
+
+    frames: list[pd.DataFrame] = []
+    missing_symbols: list[str] = []
+    for symbol in symbols:
+        file_path = adjust_dir / f"{symbol}.parquet"
+        if not file_path.exists():
+            missing_symbols.append(symbol)
+            continue
+
+        frame = pd.read_parquet(file_path)
+        if "stock_code" not in frame.columns and "symbol" in frame.columns:
+            frame = frame.rename(columns={"symbol": "stock_code"})
+        for required in REQUIRED_COLUMNS:
+            if required not in frame.columns:
+                raise ValueError(f"{file_path.name} 缺少关键列：{required}")
+
+        frame = frame.copy()
+        frame["stock_code"] = frame["stock_code"].astype(str).str.upper()
+        frames.append(frame)
+
+    if normalized_codes and missing_symbols:
+        raise FileNotFoundError(f"以下股票缺少本地 parquet 文件：{', '.join(missing_symbols)}")
+
+    if not frames:
+        raise ValueError("本地 parquet 读取结果为空，请检查股票池或日期区间。")
+
+    merged = pd.concat(frames, ignore_index=True)
+    normalized = _normalize_loaded_data(
+        merged,
+        column_map={column: column for column in REQUIRED_COLUMNS + OPTIONAL_COLUMNS},
+        start_date=start_date,
+        end_date=end_date,
+        stock_codes=stock_codes,
+        lookback_days=lookback_days,
+        lookahead_days=lookahead_days,
+    )
+    if normalized.empty:
+        raise ValueError("本地 parquet 过滤后无可用数据，请检查回测区间或股票池。")
+    return normalized
+
 def load_market_data(
     source_type: str,
     start_date: str,
@@ -506,7 +583,20 @@ def load_market_data(
     file_bytes: bytes | None = None,
     file_name: str | None = None,
     sheet_name: str | None = None,
+    local_data_root: str = "data/market/daily",
+    adjust: str = "qfq",
 ) -> pd.DataFrame:
+    if source_type == "local_parquet":
+        return load_local_parquet_data(
+            start_date=start_date,
+            end_date=end_date,
+            stock_codes=stock_codes,
+            lookback_days=lookback_days,
+            lookahead_days=lookahead_days,
+            local_data_root=local_data_root,
+            adjust=adjust,
+        )
+
     if source_type == "sqlite":
         return load_stock_data(
             db_path=db_path or "",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+import json
 
 import pandas as pd
 
@@ -26,6 +27,14 @@ BASE_DETAIL_COLUMNS = [
     "gross_return_pct",
     "net_return_pct",
     "win_flag",
+    "mfe_pct",
+    "mae_pct",
+    "max_profit_pct",
+    "exit_ma_value",
+    "profit_drawdown_ratio",
+    "fills",
+    "fill_count",
+    "fill_detail_json",
 ]
 
 DETAIL_COLUMNS = BASE_DETAIL_COLUMNS + [
@@ -60,7 +69,7 @@ def _empty_scan_stats() -> dict[str, int]:
         "signal_count": 0,
         "closed_trade_candidates": 0,
         "skipped_insufficient_future": 0,
-        "skipped_time_target_met": 0,
+        "skipped_unclosed_trade": 0,
         "skipped_no_exit": 0,
     }
 
@@ -76,6 +85,10 @@ def _empty_strategy_stats() -> dict[str, float]:
         "total_return_pct": 0.0,
         "max_drawdown_pct": 0.0,
         "avg_holding_days": 0.0,
+        "avg_mfe_pct": 0.0,
+        "avg_mae_pct": 0.0,
+        "profit_risk_ratio": 0.0,
+        "trade_return_volatility_pct": 0.0,
     }
 
 
@@ -96,16 +109,28 @@ def scan_trade_candidates(all_data: pd.DataFrame, params: AnalysisParams) -> tup
         stats["signal_count"] += len(signal_indices)
 
         for signal_idx in signal_indices:
-            trade, skip_reason = simulate_trade(enriched, signal_idx, params)
+            direction = "long" if params.gap_direction == "up" else "short"
+            trade, skip_reason = simulate_trade(enriched, signal_idx, params, direction=direction)
             if trade is None:
                 if skip_reason == "insufficient_future":
                     stats["skipped_insufficient_future"] += 1
-                elif skip_reason == "time_target_met":
-                    stats["skipped_time_target_met"] += 1
+                elif skip_reason == "unclosed_trade":
+                    stats["skipped_unclosed_trade"] += 1
                 else:
                     stats["skipped_no_exit"] += 1
                 continue
 
+            fills = trade.get("fills", [])
+            total_weight = sum(float(fill.get("weight", 0.0)) for fill in fills)
+            if total_weight <= 0:
+                stats["skipped_no_exit"] += 1
+                continue
+            trade["sell_price"] = sum(float(fill["sell_price"]) * float(fill["weight"]) for fill in fills) / total_weight
+            trade["sell_date"] = fills[-1]["sell_date"]
+            trade["exit_type"] = "+".join(str(fill["exit_type"]) for fill in fills)
+            trade["gross_return_pct"] = (trade["sell_price"] / float(trade["buy_price"]) - 1.0) * 100.0
+            trade["fill_count"] = len(fills)
+            trade["fill_detail_json"] = json.dumps(fills, ensure_ascii=False)
             detail_records.append(trade)
             stats["closed_trade_candidates"] += 1
 
@@ -163,6 +188,13 @@ def build_strategy_trades(candidate_df: pd.DataFrame) -> tuple[pd.DataFrame, dic
     stats["final_net_value"] = float(strategy_df["nav_after_trade"].iloc[-1])
     stats["total_return_pct"] = (stats["final_net_value"] - 1.0) * 100.0
     stats["avg_holding_days"] = float(strategy_df["holding_days"].mean())
+    stats["avg_mfe_pct"] = float(strategy_df["mfe_pct"].mean())
+    stats["avg_mae_pct"] = float(strategy_df["mae_pct"].mean())
+    if stats["avg_mae_pct"] == 0:
+        stats["profit_risk_ratio"] = 0.0
+    else:
+        stats["profit_risk_ratio"] = stats["avg_mfe_pct"] / abs(stats["avg_mae_pct"])
+    stats["trade_return_volatility_pct"] = float(strategy_df["net_return_pct"].std(ddof=0))
 
     return strategy_df, {**_empty_strategy_stats(), **dict(stats)}
 
@@ -172,16 +204,13 @@ def build_equity_curve(all_data: pd.DataFrame, strategy_df: pd.DataFrame, params
     end_ts = pd.to_datetime(params.end_date)
 
     if strategy_df.empty:
-        market_dates = []
+        market_dates = [start_ts]
         if not all_data.empty:
             market_dates = sorted(
                 timestamp
                 for timestamp in pd.to_datetime(all_data["date"]).dropna().unique().tolist()
                 if start_ts <= pd.Timestamp(timestamp) <= end_ts
-            )
-        if not market_dates:
-            market_dates = [start_ts]
-
+            ) or [start_ts]
         equity_df = pd.DataFrame(
             {
                 "date": market_dates,
@@ -197,7 +226,7 @@ def build_equity_curve(all_data: pd.DataFrame, strategy_df: pd.DataFrame, params
     last_exit_ts = pd.to_datetime(strategy_df["sell_date"]).max()
     curve_end = max(end_ts, last_exit_ts)
 
-    market_dates = []
+    market_dates: list[pd.Timestamp] = []
     if not all_data.empty:
         market_dates = sorted(
             timestamp
@@ -207,27 +236,100 @@ def build_equity_curve(all_data: pd.DataFrame, strategy_df: pd.DataFrame, params
     if not market_dates:
         market_dates = list(pd.date_range(start=start_ts, end=curve_end, freq="D"))
 
-    events = strategy_df.sort_values("sell_date").to_dict("records")
-    event_index = 0
+    close_lookup: dict[tuple[str, pd.Timestamp], float] = {}
+    if not all_data.empty:
+        for row in all_data[["stock_code", "date", "close"]].dropna().itertuples(index=False):
+            close_lookup[(str(row.stock_code), pd.Timestamp(row.date).normalize())] = float(row.close)
+
+    trades = strategy_df.sort_values("date").to_dict("records")
+    trade_index = 0
+    active_trade: dict | None = None
+    active_last_close: float | None = None
+
     current_nav = 1.0
     curve_records: list[dict] = []
+    direction = "long" if params.gap_direction == "up" else "short"
+
+    trade_state = {
+        "remaining_weight": 0.0,
+        "realized_value": 0.0,
+        "fills": [],
+        "fill_idx": 0,
+    }
 
     for market_date in market_dates:
+        current_date = pd.Timestamp(market_date).normalize()
         event_label = ""
         event_trade_no = pd.NA
         event_stock_code = ""
 
-        while event_index < len(events) and pd.Timestamp(events[event_index]["sell_date"]) == pd.Timestamp(market_date):
-            current_nav = float(events[event_index]["nav_after_trade"])
-            event_label = str(events[event_index]["exit_type"])
-            event_trade_no = int(events[event_index]["trade_no"])
-            event_stock_code = str(events[event_index]["stock_code"])
-            event_index += 1
+        if active_trade is None and trade_index < len(trades):
+            next_trade = trades[trade_index]
+            buy_date = pd.Timestamp(next_trade["date"]).normalize()
+            if current_date >= buy_date:
+                active_trade = next_trade
+                active_last_close = None
+                trade_state["remaining_weight"] = 1.0
+                trade_state["realized_value"] = 0.0
+                trade_state["fills"] = list(active_trade.get("fills", []))
+                trade_state["fill_idx"] = 0
+                event_label = "buy"
+                event_trade_no = int(active_trade["trade_no"])
+                event_stock_code = str(active_trade["stock_code"])
+
+        if active_trade is not None:
+            stock_code = str(active_trade["stock_code"])
+            buy_price = float(active_trade["buy_price"])
+            nav_before_trade = float(active_trade["nav_before_trade"])
+            sell_date = pd.Timestamp(active_trade["sell_date"]).normalize()
+
+            day_close = close_lookup.get((stock_code, current_date), active_last_close)
+            if day_close is not None:
+                active_last_close = day_close
+
+            # 按 fill 顺序处理当日成交
+            while trade_state["fill_idx"] < len(trade_state["fills"]):
+                fill = trade_state["fills"][trade_state["fill_idx"]]
+                fill_date = pd.to_datetime(fill["sell_date"]).normalize()
+                if fill_date != current_date:
+                    break
+                fill_weight = float(fill["weight"])
+                fill_price = float(fill["sell_price"])
+                trade_state["realized_value"] += fill_weight * fill_price
+                trade_state["remaining_weight"] -= fill_weight
+                fill_exit = str(fill.get("exit_type", "fill"))
+                event_label = fill_exit if not event_label else f"{event_label}+{fill_exit}"
+                event_trade_no = int(active_trade["trade_no"])
+                event_stock_code = stock_code
+                trade_state["fill_idx"] += 1
+
+            if day_close is not None:
+                remaining_weight = max(0.0, float(trade_state["remaining_weight"]))
+                realized_value = float(trade_state["realized_value"])
+
+                if direction == "short":
+                    effective_cover = realized_value + remaining_weight * day_close
+                    holding_return = (buy_price - effective_cover) / buy_price
+                else:
+                    marked_value = realized_value + remaining_weight * day_close
+                    holding_return = marked_value / buy_price - 1.0
+
+                current_nav = nav_before_trade * (1.0 + holding_return)
+
+            if current_date >= sell_date and trade_state["remaining_weight"] <= 1e-12:
+                current_nav = float(active_trade["nav_after_trade"])
+                if not event_label:
+                    event_label = str(active_trade["exit_type"])
+                    event_trade_no = int(active_trade["trade_no"])
+                    event_stock_code = stock_code
+                active_trade = None
+                active_last_close = None
+                trade_index += 1
 
         curve_records.append(
             {
-                "date": pd.Timestamp(market_date),
-                "net_value": current_nav,
+                "date": pd.Timestamp(current_date),
+                "net_value": float(current_nav),
                 "trade_no": event_trade_no,
                 "stock_code": event_stock_code,
                 "event": event_label,
