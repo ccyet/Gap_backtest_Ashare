@@ -203,17 +203,20 @@ def build_equity_curve(all_data: pd.DataFrame, strategy_df: pd.DataFrame, params
     start_ts = pd.to_datetime(params.start_date)
     end_ts = pd.to_datetime(params.end_date)
 
-    if strategy_df.empty:
-        market_dates = []
-        if not all_data.empty:
-            market_dates = sorted(
-                timestamp
-                for timestamp in pd.to_datetime(all_data["date"]).dropna().unique().tolist()
-                if start_ts <= pd.Timestamp(timestamp) <= end_ts
-            )
-        if not market_dates:
-            market_dates = [start_ts]
+    market_dates: list[pd.Timestamp]
+    if not all_data.empty:
+        market_dates = sorted(
+            timestamp
+            for timestamp in pd.to_datetime(all_data["date"]).dropna().unique().tolist()
+            if start_ts <= pd.Timestamp(timestamp) <= end_ts
+        )
+    else:
+        market_dates = [start_ts]
 
+    if not market_dates:
+        market_dates = [start_ts]
+
+    if strategy_df.empty:
         equity_df = pd.DataFrame(
             {
                 "date": market_dates,
@@ -226,39 +229,69 @@ def build_equity_curve(all_data: pd.DataFrame, strategy_df: pd.DataFrame, params
         )
         return equity_df[EQUITY_COLUMNS]
 
-    last_exit_ts = pd.to_datetime(strategy_df["sell_date"]).max()
-    curve_end = max(end_ts, last_exit_ts)
-
-    market_dates = []
+    # 价格查找表，用于持仓期间逐日盯市净值
+    close_lookup = {}
     if not all_data.empty:
-        market_dates = sorted(
-            timestamp
-            for timestamp in pd.to_datetime(all_data["date"]).dropna().unique().tolist()
-            if start_ts <= pd.Timestamp(timestamp) <= curve_end
-        )
-    if not market_dates:
-        market_dates = list(pd.date_range(start=start_ts, end=curve_end, freq="D"))
+        for row in all_data[["stock_code", "date", "close"]].dropna().itertuples(index=False):
+            close_lookup[(str(row.stock_code), pd.Timestamp(row.date).normalize())] = float(row.close)
 
-    events = strategy_df.sort_values("sell_date").to_dict("records")
-    event_index = 0
+    trades = strategy_df.sort_values("date").to_dict("records")
+    trade_index = 0
+    active_trade: dict | None = None
+    active_last_close: float | None = None
+
     current_nav = 1.0
     curve_records: list[dict] = []
 
+    buy_cost_ratio = params.buy_cost_ratio
+    sell_cost_ratio = params.sell_cost_ratio
+    direction = "long" if params.gap_direction == "up" else "short"
+
     for market_date in market_dates:
+        current_date = pd.Timestamp(market_date).normalize()
         event_label = ""
         event_trade_no = pd.NA
         event_stock_code = ""
 
-        while event_index < len(events) and pd.Timestamp(events[event_index]["sell_date"]) == pd.Timestamp(market_date):
-            current_nav = float(events[event_index]["nav_after_trade"])
-            event_label = str(events[event_index]["exit_type"])
-            event_trade_no = int(events[event_index]["trade_no"])
-            event_stock_code = str(events[event_index]["stock_code"])
-            event_index += 1
+        if active_trade is None and trade_index < len(trades):
+            next_trade = trades[trade_index]
+            next_buy_date = pd.Timestamp(next_trade["date"]).normalize()
+            if current_date >= next_buy_date:
+                active_trade = next_trade
+                active_last_close = None
+                event_label = "buy"
+                event_trade_no = int(active_trade["trade_no"])
+                event_stock_code = str(active_trade["stock_code"])
+
+        if active_trade is not None:
+            stock_code = str(active_trade["stock_code"])
+            buy_price = float(active_trade["buy_price"])
+            nav_before_trade = float(active_trade["nav_before_trade"])
+            sell_date = pd.Timestamp(active_trade["sell_date"]).normalize()
+
+            day_close = close_lookup.get((stock_code, current_date), active_last_close)
+            if day_close is not None:
+                active_last_close = day_close
+
+            if current_date < sell_date:
+                if day_close is not None:
+                    if direction == "short":
+                        unrealized_net_return = (buy_price - day_close * (1.0 - sell_cost_ratio)) / (buy_price * (1.0 + buy_cost_ratio))
+                    else:
+                        unrealized_net_return = (day_close * (1.0 - sell_cost_ratio)) / (buy_price * (1.0 + buy_cost_ratio)) - 1.0
+                    current_nav = nav_before_trade * (1.0 + unrealized_net_return)
+            else:
+                current_nav = float(active_trade["nav_after_trade"])
+                event_label = str(active_trade["exit_type"]) if not event_label else f"{event_label}+{active_trade['exit_type']}"
+                event_trade_no = int(active_trade["trade_no"])
+                event_stock_code = stock_code
+                active_trade = None
+                active_last_close = None
+                trade_index += 1
 
         curve_records.append(
             {
-                "date": pd.Timestamp(market_date),
+                "date": pd.Timestamp(current_date),
                 "net_value": current_nav,
                 "trade_no": event_trade_no,
                 "stock_code": event_stock_code,

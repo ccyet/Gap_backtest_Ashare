@@ -15,7 +15,7 @@ from exporter import export_to_excel_bytes
 from models import AnalysisParams, PartialExitRule, normalize_column_overrides, normalize_stock_codes, validate_params
 
 
-st.set_page_config(page_title="跳空统计分析工具", layout="wide")
+st.set_page_config(layout="wide", page_title="Gap_test 回测系统")
 
 RESULT_STATE_KEYS = [
     "detail_df",
