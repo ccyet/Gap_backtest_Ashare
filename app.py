@@ -9,10 +9,27 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from analyzer import analyze_all_stocks
-from data_loader import describe_file_source, describe_tables, list_candidate_tables, load_market_data
+from analyzer import analyze_all_stocks, run_parameter_scan
+from data_loader import (
+    describe_file_source,
+    describe_tables,
+    list_candidate_tables,
+    load_market_data,
+)
 from exporter import export_to_excel_bytes
-from models import AnalysisParams, PartialExitRule, normalize_column_overrides, normalize_stock_codes, validate_params
+from models import (
+    AnalysisParams,
+    GAP_ENTRY_MODES,
+    ParamScanAxis,
+    ParamScanConfig,
+    PartialExitRule,
+    SCAN_FIELD_CASTERS,
+    SCAN_METRICS,
+    normalize_column_overrides,
+    normalize_stock_codes,
+    parse_scan_values,
+    validate_params,
+)
 
 
 st.set_page_config(layout="wide", page_title="Gap_test 回测系统")
@@ -22,15 +39,64 @@ RESULT_STATE_KEYS = [
     "daily_df",
     "equity_df",
     "stats",
+    "scan_df",
+    "scan_metric",
+    "scan_axis_fields",
+    "best_scan_overrides",
     "excel_bytes",
     "download_name",
 ]
 
-DETAIL_PRICE_COLUMNS = ["prev_close", "prev_high", "prev_low", "open", "close", "buy_price", "sell_price", "exit_ma_value"]
-DETAIL_PERCENT_COLUMNS = ["gap_pct_vs_prev_close", "gross_return_pct", "net_return_pct", "mfe_pct", "mae_pct", "max_profit_pct", "profit_drawdown_ratio"]
+DETAIL_PRICE_COLUMNS = [
+    "prev_close",
+    "prev_high",
+    "prev_low",
+    "open",
+    "close",
+    "buy_price",
+    "sell_price",
+    "exit_ma_value",
+]
+DETAIL_PERCENT_COLUMNS = [
+    "gap_pct_vs_prev_close",
+    "gross_return_pct",
+    "net_return_pct",
+    "mfe_pct",
+    "mae_pct",
+    "max_profit_pct",
+    "profit_drawdown_ratio",
+]
 DETAIL_NAV_COLUMNS = ["nav_before_trade", "nav_after_trade"]
-SUMMARY_PERCENT_COLUMNS = ["win_rate_pct", "avg_net_return_pct", "median_net_return_pct"]
+SUMMARY_PERCENT_COLUMNS = [
+    "win_rate_pct",
+    "avg_net_return_pct",
+    "median_net_return_pct",
+]
 EQUITY_PERCENT_COLUMNS = ["drawdown_pct"]
+SCAN_FIELD_LABELS = {
+    "gap_pct": "跳空幅度",
+    "max_gap_filter_pct": "最大高开/低开过滤",
+    "time_stop_days": "最多持有天数",
+    "time_stop_target_pct": "时间退出收益阈值",
+    "stop_loss_pct": "全仓止损",
+    "take_profit_pct": "固定止盈",
+    "profit_drawdown_pct": "盈利回撤",
+    "exit_ma_period": "离场均线周期",
+    "buy_slippage_pct": "买入滑点",
+    "sell_slippage_pct": "卖出滑点",
+}
+SCAN_METRIC_LABELS = {
+    "signal_count": "信号数",
+    "closed_trade_candidates": "候选平仓交易数",
+    "executed_trades": "实际执行交易数",
+    "strategy_win_rate_pct": "策略胜率",
+    "total_return_pct": "总收益率",
+    "max_drawdown_pct": "最大回撤",
+    "final_net_value": "最终净值",
+    "avg_holding_days": "平均持有天数",
+    "profit_risk_ratio": "收益风险比",
+    "trade_return_volatility_pct": "单笔收益波动率",
+}
 
 
 def dataframe_stretch(data: object, *, hide_index: bool = False) -> None:
@@ -49,13 +115,48 @@ def clear_result_state() -> None:
 def build_data_format_table() -> pd.DataFrame:
     return pd.DataFrame(
         [
-            {"列名建议": "交易日期", "是否必填": "必填", "说明": "交易日，一行代表一只股票在一个交易日的数据", "示例": "2026-03-13"},
-            {"列名建议": "股票代码", "是否必填": "必填", "说明": "股票唯一标识", "示例": "000001.SZ"},
-            {"列名建议": "开盘价", "是否必填": "必填", "说明": "当天开盘价", "示例": "10.52"},
-            {"列名建议": "最高价", "是否必填": "必填", "说明": "当天最高价", "示例": "10.88"},
-            {"列名建议": "最低价", "是否必填": "必填", "说明": "当天最低价", "示例": "10.31"},
-            {"列名建议": "收盘价", "是否必填": "必填", "说明": "当天收盘价", "示例": "10.66"},
-            {"列名建议": "成交量", "是否必填": "选填", "说明": "当天成交量，不填也可以分析", "示例": "1256300"},
+            {
+                "列名建议": "交易日期",
+                "是否必填": "必填",
+                "说明": "交易日，一行代表一只股票在一个交易日的数据",
+                "示例": "2026-03-13",
+            },
+            {
+                "列名建议": "股票代码",
+                "是否必填": "必填",
+                "说明": "股票唯一标识",
+                "示例": "000001.SZ",
+            },
+            {
+                "列名建议": "开盘价",
+                "是否必填": "必填",
+                "说明": "当天开盘价",
+                "示例": "10.52",
+            },
+            {
+                "列名建议": "最高价",
+                "是否必填": "必填",
+                "说明": "当天最高价",
+                "示例": "10.88",
+            },
+            {
+                "列名建议": "最低价",
+                "是否必填": "必填",
+                "说明": "当天最低价",
+                "示例": "10.31",
+            },
+            {
+                "列名建议": "收盘价",
+                "是否必填": "必填",
+                "说明": "当天收盘价",
+                "示例": "10.66",
+            },
+            {
+                "列名建议": "成交量",
+                "是否必填": "选填",
+                "说明": "当天成交量，不填也可以分析",
+                "示例": "1256300",
+            },
         ]
     )
 
@@ -111,7 +212,9 @@ def build_template_note() -> pd.DataFrame:
 def build_template_bytes() -> bytes:
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        build_sample_input_data().to_excel(writer, sheet_name="行情数据模板", index=False)
+        build_sample_input_data().to_excel(
+            writer, sheet_name="行情数据模板", index=False
+        )
         build_data_format_table().to_excel(writer, sheet_name="字段说明", index=False)
         build_template_note().to_excel(writer, sheet_name="填写说明", index=False)
     buffer.seek(0)
@@ -124,22 +227,32 @@ def format_detail_for_display(detail_df: pd.DataFrame) -> pd.DataFrame:
 
     display_df = detail_df.copy()
     display_df["date"] = pd.to_datetime(display_df["date"]).dt.strftime("%Y-%m-%d")
-    display_df["sell_date"] = pd.to_datetime(display_df["sell_date"]).dt.strftime("%Y-%m-%d")
+    display_df["sell_date"] = pd.to_datetime(display_df["sell_date"]).dt.strftime(
+        "%Y-%m-%d"
+    )
 
     for column in DETAIL_PRICE_COLUMNS:
         if column in display_df.columns:
-            display_df[column] = display_df[column].map(lambda value: f"{value:.2f}" if pd.notna(value) else "")
+            display_df[column] = display_df[column].map(
+                lambda value: f"{value:.2f}" if pd.notna(value) else ""
+            )
 
     for column in DETAIL_PERCENT_COLUMNS:
         if column in display_df.columns:
-            display_df[column] = display_df[column].map(lambda value: f"{value:.2f}%" if pd.notna(value) else "")
+            display_df[column] = display_df[column].map(
+                lambda value: f"{value:.2f}%" if pd.notna(value) else ""
+            )
 
     for column in DETAIL_NAV_COLUMNS:
         if column in display_df.columns:
-            display_df[column] = display_df[column].map(lambda value: f"{value:.4f}" if pd.notna(value) else "")
+            display_df[column] = display_df[column].map(
+                lambda value: f"{value:.4f}" if pd.notna(value) else ""
+            )
 
     if "volume" in display_df.columns:
-        display_df["volume"] = display_df["volume"].map(lambda value: f"{value:,.0f}" if pd.notna(value) else "")
+        display_df["volume"] = display_df["volume"].map(
+            lambda value: f"{value:,.0f}" if pd.notna(value) else ""
+        )
 
     return display_df
 
@@ -151,8 +264,12 @@ def format_summary_for_display(daily_df: pd.DataFrame) -> pd.DataFrame:
     display_df = daily_df.copy()
     display_df["date"] = pd.to_datetime(display_df["date"]).dt.strftime("%Y-%m-%d")
     for column in SUMMARY_PERCENT_COLUMNS:
-        display_df[column] = display_df[column].map(lambda value: f"{value:.2f}%" if pd.notna(value) else "")
-    display_df["avg_holding_days"] = display_df["avg_holding_days"].map(lambda value: f"{value:.2f}" if pd.notna(value) else "")
+        display_df[column] = display_df[column].map(
+            lambda value: f"{value:.2f}%" if pd.notna(value) else ""
+        )
+    display_df["avg_holding_days"] = display_df["avg_holding_days"].map(
+        lambda value: f"{value:.2f}" if pd.notna(value) else ""
+    )
     return display_df
 
 
@@ -162,15 +279,48 @@ def format_equity_for_display(equity_df: pd.DataFrame) -> pd.DataFrame:
 
     display_df = equity_df.copy()
     display_df["date"] = pd.to_datetime(display_df["date"]).dt.strftime("%Y-%m-%d")
-    display_df["net_value"] = display_df["net_value"].map(lambda value: f"{value:.4f}" if pd.notna(value) else "")
+    display_df["net_value"] = display_df["net_value"].map(
+        lambda value: f"{value:.4f}" if pd.notna(value) else ""
+    )
     for column in EQUITY_PERCENT_COLUMNS:
         if column in display_df.columns:
-            display_df[column] = display_df[column].map(lambda value: f"{value:.2f}%" if pd.notna(value) else "")
+            display_df[column] = display_df[column].map(
+                lambda value: f"{value:.2f}%" if pd.notna(value) else ""
+            )
     return display_df
 
 
 def build_download_name(start_date: str, end_date: str) -> str:
     return f"gap_analysis_{start_date}_{end_date}.xlsx"
+
+
+def build_scan_axis(field_name: str, raw_text: str) -> ParamScanAxis | None:
+    if field_name == "":
+        return None
+    values = parse_scan_values(field_name, raw_text)
+    if not values:
+        return None
+    return ParamScanAxis(field_name=field_name, values=values)
+
+
+def format_scan_for_display(scan_df: pd.DataFrame) -> pd.DataFrame:
+    if scan_df.empty:
+        return scan_df
+    display_df = scan_df.copy()
+    for column in display_df.columns:
+        if column.endswith("_pct") and column != "rank":
+            display_df[column] = display_df[column].map(
+                lambda value: f"{value:.2f}%" if pd.notna(value) else ""
+            )
+        elif column == "final_net_value":
+            display_df[column] = display_df[column].map(
+                lambda value: f"{value:.4f}" if pd.notna(value) else ""
+            )
+        elif column == "rank":
+            display_df[column] = display_df[column].map(
+                lambda value: int(value) if pd.notna(value) else ""
+            )
+    return display_df
 
 
 def run_local_data_update(
@@ -206,11 +356,33 @@ def run_local_data_update(
 def load_update_log_preview(limit: int = 20) -> pd.DataFrame:
     log_file = Path("data/market/metadata/update_log.parquet")
     if not log_file.exists():
-        return pd.DataFrame(columns=["symbol", "adjust", "start_date", "end_date", "rows", "updated_at", "status", "error_message"])
+        return pd.DataFrame(
+            columns=[
+                "symbol",
+                "adjust",
+                "start_date",
+                "end_date",
+                "rows",
+                "updated_at",
+                "status",
+                "error_message",
+            ]
+        )
     try:
         df = pd.read_parquet(log_file)
     except Exception:
-        return pd.DataFrame(columns=["symbol", "adjust", "start_date", "end_date", "rows", "updated_at", "status", "error_message"])
+        return pd.DataFrame(
+            columns=[
+                "symbol",
+                "adjust",
+                "start_date",
+                "end_date",
+                "rows",
+                "updated_at",
+                "status",
+                "error_message",
+            ]
+        )
 
     if "updated_at" in df.columns:
         df["updated_at"] = pd.to_datetime(df["updated_at"], errors="coerce")
@@ -224,14 +396,28 @@ with st.expander("本地行情更新（离线下载）", expanded=True):
     st.caption("推荐路径：先离线更新本地 parquet，再进行回测。")
     up_c1, up_c2, up_c3 = st.columns(3)
     with up_c1:
-        update_symbols = st.text_area("股票代码（可选）", value="", help="多个代码用逗号分隔，空表示全量。")
+        update_symbols = st.text_area(
+            "股票代码（可选）", value="", help="多个代码用逗号分隔，空表示全量。"
+        )
     with up_c2:
-        update_start = st.date_input("更新开始日期", value=(pd.Timestamp.today().date() - pd.Timedelta(days=30)), key="offline_update_start")
-        update_end = st.date_input("更新结束日期", value=pd.Timestamp.today().date(), key="offline_update_end")
+        update_start = st.date_input(
+            "更新开始日期",
+            value=(pd.Timestamp.today().date() - pd.Timedelta(days=30)),
+            key="offline_update_start",
+        )
+        update_end = st.date_input(
+            "更新结束日期", value=pd.Timestamp.today().date(), key="offline_update_end"
+        )
     with up_c3:
-        update_adjust = st.selectbox("更新复权方式", options=["qfq", "hfq"], index=0, key="offline_update_adjust")
-        refresh_symbol_meta = st.checkbox("刷新股票列表", value=False, key="offline_update_refresh")
-        export_excel_after_update = st.checkbox("更新后另存为 Excel", value=False, key="offline_update_export")
+        update_adjust = st.selectbox(
+            "更新复权方式", options=["qfq", "hfq"], index=0, key="offline_update_adjust"
+        )
+        refresh_symbol_meta = st.checkbox(
+            "刷新股票列表", value=False, key="offline_update_refresh"
+        )
+        export_excel_after_update = st.checkbox(
+            "更新后另存为 Excel", value=False, key="offline_update_export"
+        )
 
     if st.button("开始更新本地数据", key="offline_update_submit"):
         ok, output = run_local_data_update(
@@ -257,11 +443,21 @@ with st.expander("本地行情更新（离线下载）", expanded=True):
 
 # ===== Sidebar: 基础参数 =====
 st.sidebar.header("基础参数")
-stock_scope_text = st.sidebar.text_area("股票池", value="", help="多个代码可用逗号/空格/换行。留空表示全市场。")
-start_date = st.sidebar.date_input("回测开始", value=(pd.Timestamp.today().date() - pd.Timedelta(days=365)))
+stock_scope_text = st.sidebar.text_area(
+    "股票池", value="", help="多个代码可用逗号/空格/换行。留空表示全市场。"
+)
+start_date = st.sidebar.date_input(
+    "回测开始", value=(pd.Timestamp.today().date() - pd.Timedelta(days=365))
+)
 end_date = st.sidebar.date_input("回测结束", value=pd.Timestamp.today().date())
-SOURCE_LABEL_TO_TYPE = {"本地 Parquet（AKShare 离线）": "local_parquet", "Excel/CSV 文件": "file", "SQLite 数据库": "sqlite"}
-data_source_label = st.sidebar.selectbox("数据源", options=list(SOURCE_LABEL_TO_TYPE.keys()))
+SOURCE_LABEL_TO_TYPE = {
+    "本地 Parquet（AKShare 离线）": "local_parquet",
+    "Excel/CSV 文件": "file",
+    "SQLite 数据库": "sqlite",
+}
+data_source_label = st.sidebar.selectbox(
+    "数据源", options=list(SOURCE_LABEL_TO_TYPE.keys())
+)
 adjust_label = st.sidebar.selectbox("复权方式", options=["qfq", "hfq"], index=0)
 submitted = st.sidebar.button("开始回测", type="primary")
 
@@ -273,12 +469,16 @@ input_file_path = ""
 excel_sheet_name = ""
 uploaded_market_file = None
 
-local_data_root = st.sidebar.text_input("本地 Parquet 根目录", value="data/market/daily")
+local_data_root = st.sidebar.text_input(
+    "本地 Parquet 根目录", value="data/market/daily"
+)
 if data_source_label == "SQLite 数据库":
     db_path = st.sidebar.text_input("SQLite 路径", value=default_db_path)
     table_name = st.sidebar.text_input("表名（可选）", value="")
 elif data_source_label == "Excel/CSV 文件":
-    uploaded_market_file = st.sidebar.file_uploader("上传行情文件", type=["xlsx", "xlsm", "csv"])
+    uploaded_market_file = st.sidebar.file_uploader(
+        "上传行情文件", type=["xlsx", "xlsm", "csv"]
+    )
     input_file_path = st.sidebar.text_input("或本地文件路径（可选）", value="")
     excel_sheet_name = st.sidebar.text_input("工作表（Excel 可选）", value="")
 else:
@@ -287,71 +487,243 @@ else:
 # ===== 主界面：配置摘要 =====
 st.subheader("当前配置摘要")
 summary_cols = st.columns(3)
-summary_cols[0].info(f"方向: {'做多' if st.session_state.get('direction_label', '向上跳空') == '向上跳空' else '做空'}")
+summary_cols[0].info(
+    f"方向: {'做多' if st.session_state.get('direction_label', '向上跳空') == '向上跳空' else '做空'}"
+)
 summary_cols[1].info(f"股票池: {stock_scope_text.strip() or '全市场'}")
 summary_cols[2].info(f"区间: {start_date} ~ {end_date}")
 summary_cols_2 = st.columns(3)
 summary_cols_2[0].info(f"复权: {adjust_label}")
-summary_cols_2[1].info(f"分批退出: {'开启' if st.session_state.get('partial_exit_enabled', False) else '关闭'}")
-summary_cols_2[2].info(f"时间退出: {'开启' if st.session_state.get('use_time_stop', True) else '关闭'}")
+summary_cols_2[1].info(
+    f"分批退出: {'开启' if st.session_state.get('partial_exit_enabled', False) else '关闭'}"
+)
+summary_cols_2[2].info(
+    f"时间退出: {'开启' if st.session_state.get('use_time_stop', True) else '关闭'}"
+)
 
 # ===== 主界面：规则配置 =====
 with st.expander("⚙️ 核心交易规则配置", expanded=True):
-    direction_label = st.selectbox("交易方向", options=["向上跳空", "向下跳空"], key="direction_label")
+    direction_label = st.selectbox(
+        "交易方向", options=["向上跳空", "向下跳空"], key="direction_label"
+    )
+    gap_entry_mode = st.selectbox(
+        "开仓信号模式",
+        options=list(GAP_ENTRY_MODES),
+        format_func=lambda value: (
+            "严格突破前高/前低" if value == "strict_break" else "开盘相对昨收达到阈值"
+        ),
+    )
     gap_pct = st.number_input("跳空幅度（%）", min_value=0.0, value=2.0, step=0.1)
-    max_gap_filter_pct = st.number_input("最大高开/低开过滤（%）", min_value=0.0, value=9.9, step=0.1)
+    max_gap_filter_pct = st.number_input(
+        "最大高开/低开过滤（%）", min_value=0.0, value=9.9, step=0.1
+    )
 
     use_ma_filter = st.checkbox("启用快慢线开单过滤", value=False)
     c1, c2 = st.columns(2)
-    fast_ma_period = c1.number_input("快线周期", min_value=1, value=5, step=1, disabled=not use_ma_filter)
-    slow_ma_period = c2.number_input("慢线周期", min_value=1, value=20, step=1, disabled=not use_ma_filter)
+    fast_ma_period = c1.number_input(
+        "快线周期", min_value=1, value=5, step=1, disabled=not use_ma_filter
+    )
+    slow_ma_period = c2.number_input(
+        "慢线周期", min_value=1, value=20, step=1, disabled=not use_ma_filter
+    )
 
     use_time_stop = st.checkbox("启用时间退出", value=True, key="use_time_stop")
     c3, c4 = st.columns(2)
-    time_stop_days = c3.number_input("最多持有天数 N", min_value=1, value=5, step=1, disabled=not use_time_stop)
-    time_stop_target_pct = c4.number_input("时间退出收益阈值（%）", value=1.0, step=0.1, disabled=not use_time_stop)
-    time_exit_mode_label = st.selectbox("数据结束处理", options=["按原规则剔除未达条件信号", "第 N 天按收盘价结束交易"])
+    time_stop_days = c3.number_input(
+        "最多持有天数 N", min_value=1, value=5, step=1, disabled=not use_time_stop
+    )
+    time_stop_target_pct = c4.number_input(
+        "时间退出收益阈值（%）", value=1.0, step=0.1, disabled=not use_time_stop
+    )
+    time_exit_mode_label = st.selectbox(
+        "数据结束处理", options=["按原规则剔除未达条件信号", "第 N 天按收盘价结束交易"]
+    )
 
     stop_loss_pct = st.number_input("全仓止损（%）", min_value=0.0, value=3.0, step=0.1)
     enable_take_profit = st.checkbox("启用固定止盈", value=True)
-    take_profit_pct = st.number_input("固定止盈（%）", min_value=0.0, value=5.0, step=0.1, disabled=not enable_take_profit)
+    take_profit_pct = st.number_input(
+        "固定止盈（%）",
+        min_value=0.0,
+        value=5.0,
+        step=0.1,
+        disabled=not enable_take_profit,
+    )
 
     enable_profit_drawdown_exit = st.checkbox("启用盈利回撤止盈（整笔）", value=False)
-    profit_drawdown_pct = st.number_input("盈利回撤（%）", min_value=0.0, value=40.0, step=1.0, disabled=not enable_profit_drawdown_exit)
+    profit_drawdown_pct = st.number_input(
+        "盈利回撤（%）",
+        min_value=0.0,
+        value=40.0,
+        step=1.0,
+        disabled=not enable_profit_drawdown_exit,
+    )
 
     enable_ma_exit = st.checkbox("启用均线离场（整笔）", value=False)
-    exit_ma_period = st.number_input("离场均线周期", min_value=1, value=10, step=1, disabled=not enable_ma_exit)
-    ma_exit_batches = st.number_input("均线离场分批数", min_value=2, max_value=3, value=2, step=1, disabled=not enable_ma_exit)
+    exit_ma_period = st.number_input(
+        "离场均线周期", min_value=1, value=10, step=1, disabled=not enable_ma_exit
+    )
+    ma_exit_batches = st.number_input(
+        "均线离场分批数",
+        min_value=2,
+        max_value=3,
+        value=2,
+        step=1,
+        disabled=not enable_ma_exit,
+    )
 
-    buy_cost_pct = st.number_input("买入成本（%）", min_value=0.0, value=0.03, step=0.01, format="%.4f")
-    sell_cost_pct = st.number_input("卖出成本（%）", min_value=0.0, value=0.13, step=0.01, format="%.4f")
+    buy_cost_pct = st.number_input(
+        "买入成本（%）", min_value=0.0, value=0.03, step=0.01, format="%.4f"
+    )
+    sell_cost_pct = st.number_input(
+        "卖出成本（%）", min_value=0.0, value=0.13, step=0.01, format="%.4f"
+    )
+    buy_slippage_pct = st.number_input(
+        "买入滑点（%）", min_value=0.0, value=0.0, step=0.01, format="%.4f"
+    )
+    sell_slippage_pct = st.number_input(
+        "卖出滑点（%）", min_value=0.0, value=0.0, step=0.01, format="%.4f"
+    )
 
 with st.expander("🛠️ 分批止盈高级配置", expanded=False):
-    partial_exit_enabled = st.checkbox("启用分批止盈", value=False, key="partial_exit_enabled")
-    partial_exit_count = st.number_input("分批数量", min_value=2, max_value=3, value=2, step=1, disabled=not partial_exit_enabled)
+    partial_exit_enabled = st.checkbox(
+        "启用分批止盈", value=False, key="partial_exit_enabled"
+    )
+    partial_exit_count = st.number_input(
+        "分批数量",
+        min_value=2,
+        max_value=3,
+        value=2,
+        step=1,
+        disabled=not partial_exit_enabled,
+    )
     partial_rule_inputs = []
     for i in range(1, int(partial_exit_count) + 1):
         with st.expander(f"第 {i} 批", expanded=(i <= 2)):
             c1, c2 = st.columns(2)
-            weight_default = 50.0 if int(partial_exit_count) == 2 else [30.0, 30.0, 40.0][i - 1]
-            mode_default = ["fixed_tp", "ma_exit"][i - 1] if int(partial_exit_count) == 2 else ["fixed_tp", "fixed_tp", "ma_exit"][i - 1]
-            weight_pct = c1.number_input(f"第{i}批 仓位比例%", min_value=0.0, max_value=100.0, value=weight_default, step=1.0, disabled=not partial_exit_enabled, key=f"p_weight_{i}")
-            priority = c1.number_input(f"第{i}批 priority", min_value=1, max_value=10, value=i, step=1, disabled=not partial_exit_enabled, key=f"p_priority_{i}")
-            mode = c2.selectbox(f"第{i}批 退出方式", options=["fixed_tp", "ma_exit", "profit_drawdown"], index=["fixed_tp", "ma_exit", "profit_drawdown"].index(mode_default), disabled=not partial_exit_enabled, key=f"p_mode_{i}")
-            tp = st.number_input(f"第{i}批 目标收益%", value=5.0, step=0.1, disabled=(not partial_exit_enabled) or mode != "fixed_tp", key=f"p_tp_{i}")
-            ma = st.number_input(f"第{i}批 均线周期", min_value=1, value=10, step=1, disabled=(not partial_exit_enabled) or mode != "ma_exit", key=f"p_ma_{i}")
-            dd = st.number_input(f"第{i}批 回撤比例%", min_value=0.0, value=20.0, step=0.1, disabled=(not partial_exit_enabled) or mode != "profit_drawdown", key=f"p_dd_{i}")
-            mpa = st.number_input(f"第{i}批 最小浮盈激活%", min_value=0.0, value=5.0, step=0.1, disabled=(not partial_exit_enabled) or mode != "profit_drawdown", key=f"p_mpa_{i}")
-            partial_rule_inputs.append({
-                "enabled": bool(partial_exit_enabled),
-                "weight_pct": float(weight_pct),
-                "mode": mode,
-                "priority": int(priority),
-                "target_profit_pct": float(tp) if mode == "fixed_tp" else None,
-                "ma_period": int(ma) if mode == "ma_exit" else None,
-                "drawdown_pct": float(dd) if mode == "profit_drawdown" else None,
-                "min_profit_to_activate_drawdown": float(mpa) if mode == "profit_drawdown" else None,
-            })
+            weight_default = (
+                50.0 if int(partial_exit_count) == 2 else [30.0, 30.0, 40.0][i - 1]
+            )
+            mode_default = (
+                ["fixed_tp", "ma_exit"][i - 1]
+                if int(partial_exit_count) == 2
+                else ["fixed_tp", "fixed_tp", "ma_exit"][i - 1]
+            )
+            weight_pct = c1.number_input(
+                f"第{i}批 仓位比例%",
+                min_value=0.0,
+                max_value=100.0,
+                value=weight_default,
+                step=1.0,
+                disabled=not partial_exit_enabled,
+                key=f"p_weight_{i}",
+            )
+            priority = c1.number_input(
+                f"第{i}批 priority",
+                min_value=1,
+                max_value=10,
+                value=i,
+                step=1,
+                disabled=not partial_exit_enabled,
+                key=f"p_priority_{i}",
+            )
+            mode = c2.selectbox(
+                f"第{i}批 退出方式",
+                options=["fixed_tp", "ma_exit", "profit_drawdown"],
+                index=["fixed_tp", "ma_exit", "profit_drawdown"].index(mode_default),
+                disabled=not partial_exit_enabled,
+                key=f"p_mode_{i}",
+            )
+            tp = st.number_input(
+                f"第{i}批 目标收益%",
+                value=5.0,
+                step=0.1,
+                disabled=(not partial_exit_enabled) or mode != "fixed_tp",
+                key=f"p_tp_{i}",
+            )
+            ma = st.number_input(
+                f"第{i}批 均线周期",
+                min_value=1,
+                value=10,
+                step=1,
+                disabled=(not partial_exit_enabled) or mode != "ma_exit",
+                key=f"p_ma_{i}",
+            )
+            dd = st.number_input(
+                f"第{i}批 回撤比例%",
+                min_value=0.0,
+                value=20.0,
+                step=0.1,
+                disabled=(not partial_exit_enabled) or mode != "profit_drawdown",
+                key=f"p_dd_{i}",
+            )
+            mpa = st.number_input(
+                f"第{i}批 最小浮盈激活%",
+                min_value=0.0,
+                value=5.0,
+                step=0.1,
+                disabled=(not partial_exit_enabled) or mode != "profit_drawdown",
+                key=f"p_mpa_{i}",
+            )
+            partial_rule_inputs.append(
+                {
+                    "enabled": bool(partial_exit_enabled),
+                    "weight_pct": float(weight_pct),
+                    "mode": mode,
+                    "priority": int(priority),
+                    "target_profit_pct": float(tp) if mode == "fixed_tp" else None,
+                    "ma_period": int(ma) if mode == "ma_exit" else None,
+                    "drawdown_pct": float(dd) if mode == "profit_drawdown" else None,
+                    "min_profit_to_activate_drawdown": float(mpa)
+                    if mode == "profit_drawdown"
+                    else None,
+                }
+            )
+
+with st.expander("🔎 参数敏感性扫描", expanded=False):
+    scan_enabled = st.checkbox("启用参数扫描", value=False)
+    scan_metric = st.selectbox(
+        "扫描排序指标",
+        options=list(SCAN_METRICS),
+        format_func=lambda value: SCAN_METRIC_LABELS.get(value, value),
+        disabled=not scan_enabled,
+    )
+    scan_field_options = [""] + list(SCAN_FIELD_CASTERS.keys())
+    scan_axis_1 = st.selectbox(
+        "扫描维度 1",
+        options=scan_field_options,
+        format_func=lambda value: (
+            "请选择字段" if value == "" else SCAN_FIELD_LABELS.get(value, value)
+        ),
+        disabled=not scan_enabled,
+    )
+    scan_axis_1_values = st.text_input(
+        "维度 1 取值",
+        value="",
+        disabled=not scan_enabled,
+        help="使用逗号分隔，例如 2,3,4",
+    )
+    scan_axis_2 = st.selectbox(
+        "扫描维度 2（可选）",
+        options=scan_field_options,
+        format_func=lambda value: (
+            "不启用第二维" if value == "" else SCAN_FIELD_LABELS.get(value, value)
+        ),
+        disabled=not scan_enabled,
+    )
+    scan_axis_2_values = st.text_input(
+        "维度 2 取值",
+        value="",
+        disabled=not scan_enabled,
+        help="留空表示只扫描一维",
+    )
+    scan_max_combinations = st.number_input(
+        "最大组合数",
+        min_value=1,
+        max_value=100,
+        value=25,
+        step=1,
+        disabled=not scan_enabled,
+    )
 
 # 字段映射
 with st.expander("字段映射（可选）", expanded=False):
@@ -367,19 +739,39 @@ with st.expander("字段映射（可选）", expanded=False):
 if submitted:
     clear_result_state()
     source_type = SOURCE_LABEL_TO_TYPE[data_source_label]
-    uploaded_file_bytes = uploaded_market_file.getvalue() if uploaded_market_file is not None else None
-    uploaded_file_name = uploaded_market_file.name if uploaded_market_file is not None else None
+    uploaded_file_bytes = (
+        uploaded_market_file.getvalue() if uploaded_market_file is not None else None
+    )
+    uploaded_file_name = (
+        uploaded_market_file.name if uploaded_market_file is not None else None
+    )
 
-    column_overrides = normalize_column_overrides({
-        "date": date_column,
-        "stock_code": stock_code_column,
-        "open": open_column,
-        "high": high_column,
-        "low": low_column,
-        "close": close_column,
-        "volume": volume_column,
-    })
+    column_overrides = normalize_column_overrides(
+        {
+            "date": date_column,
+            "stock_code": stock_code_column,
+            "open": open_column,
+            "high": high_column,
+            "low": low_column,
+            "close": close_column,
+            "volume": volume_column,
+        }
+    )
     partial_rules = tuple(PartialExitRule(**rule) for rule in partial_rule_inputs)
+    scan_axes = tuple(
+        axis
+        for axis in (
+            build_scan_axis(str(scan_axis_1), scan_axis_1_values),
+            build_scan_axis(str(scan_axis_2), scan_axis_2_values),
+        )
+        if axis is not None
+    )
+    scan_config = ParamScanConfig(
+        enabled=bool(scan_enabled),
+        axes=scan_axes,
+        metric=str(scan_metric),
+        max_combinations=int(scan_max_combinations),
+    )
     params = AnalysisParams(
         data_source_type=source_type,
         db_path=db_path.strip(),
@@ -390,6 +782,7 @@ if submitted:
         end_date=end_date.strftime("%Y-%m-%d"),
         stock_codes=normalize_stock_codes(stock_scope_text),
         gap_direction="up" if direction_label == "向上跳空" else "down",
+        gap_entry_mode=str(gap_entry_mode),
         gap_pct=float(gap_pct),
         max_gap_filter_pct=float(max_gap_filter_pct),
         use_ma_filter=bool(use_ma_filter),
@@ -410,9 +803,14 @@ if submitted:
         partial_exit_rules=partial_rules,
         buy_cost_pct=float(buy_cost_pct),
         sell_cost_pct=float(sell_cost_pct),
-        time_exit_mode="strict" if time_exit_mode_label == "按原规则剔除未达条件信号" else "force_close",
+        buy_slippage_pct=float(buy_slippage_pct),
+        sell_slippage_pct=float(sell_slippage_pct),
+        time_exit_mode="strict"
+        if time_exit_mode_label == "按原规则剔除未达条件信号"
+        else "force_close",
         local_data_root=str(local_data_root),
         adjust=str(adjust_label),
+        scan_config=scan_config,
     )
 
     errors, warnings = validate_params(params)
@@ -425,7 +823,11 @@ if submitted:
             st.warning("同时提供了上传文件和本地文件路径，当前会优先使用上传文件。")
         if uploaded_file_bytes is None and not input_file_path:
             errors.append("请选择 Excel/CSV 文件，或者填写本地文件路径。")
-        if uploaded_file_bytes is None and input_file_path and not Path(input_file_path).exists():
+        if (
+            uploaded_file_bytes is None
+            and input_file_path
+            and not Path(input_file_path).exists()
+        ):
             errors.append(f"找不到文件：{input_file_path}")
 
     if errors:
@@ -452,15 +854,39 @@ if submitted:
                     local_data_root=params.local_data_root,
                     adjust=params.adjust,
                 )
-                detail_df, daily_df, equity_df, stats = analyze_all_stocks(all_data, params)
-                excel_bytes = export_to_excel_bytes(detail_df, daily_df, equity_df)
+                scan_df = pd.DataFrame()
+                best_scan_overrides: dict[str, int | float] = {}
+                if params.scan_config.enabled:
+                    (
+                        scan_df,
+                        detail_df,
+                        daily_df,
+                        equity_df,
+                        stats,
+                        best_scan_overrides,
+                    ) = run_parameter_scan(all_data, params)
+                else:
+                    detail_df, daily_df, equity_df, stats = analyze_all_stocks(
+                        all_data, params
+                    )
+                excel_bytes = export_to_excel_bytes(
+                    detail_df, daily_df, equity_df, scan_df=scan_df
+                )
             st.success("回测完成")
             st.session_state["detail_df"] = detail_df
             st.session_state["daily_df"] = daily_df
             st.session_state["equity_df"] = equity_df
             st.session_state["stats"] = stats
+            st.session_state["scan_df"] = scan_df
+            st.session_state["scan_metric"] = params.scan_config.metric
+            st.session_state["scan_axis_fields"] = [
+                axis.field_name for axis in params.scan_config.axes
+            ]
+            st.session_state["best_scan_overrides"] = best_scan_overrides
             st.session_state["excel_bytes"] = excel_bytes
-            st.session_state["download_name"] = build_download_name(params.start_date, params.end_date)
+            st.session_state["download_name"] = build_download_name(
+                params.start_date, params.end_date
+            )
         except Exception as exc:
             st.error(f"回测失败：{exc}")
 
@@ -468,15 +894,29 @@ detail_df = st.session_state.get("detail_df", pd.DataFrame())
 daily_df = st.session_state.get("daily_df", pd.DataFrame())
 equity_df = st.session_state.get("equity_df", pd.DataFrame())
 stats = st.session_state.get("stats", {})
+scan_df = st.session_state.get("scan_df", pd.DataFrame())
+scan_metric = str(st.session_state.get("scan_metric", "total_return_pct"))
+scan_axis_fields = list(st.session_state.get("scan_axis_fields", []))
+best_scan_overrides = dict(st.session_state.get("best_scan_overrides", {}))
 
 if isinstance(detail_df, pd.DataFrame) and "excel_bytes" in st.session_state:
-    tab_summary, tab_curve, tab_details = st.tabs(["📊 绩效总览", "📈 资金曲线", "📝 交易明细"])
+    tab_names = ["📊 绩效总览", "📈 资金曲线", "📝 交易明细"]
+    if isinstance(scan_df, pd.DataFrame) and not scan_df.empty:
+        tab_names.append("🔎 参数扫描")
+    tabs = st.tabs(tab_names)
+    tab_summary, tab_curve, tab_details = tabs[:3]
     with tab_summary:
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("总收益率", f"{float(stats.get('total_return_pct', 0.0)):.2f}%")
         c2.metric("胜率", f"{float(stats.get('strategy_win_rate_pct', 0.0)):.2f}%")
         c3.metric("最大回撤", f"{float(stats.get('max_drawdown_pct', 0.0)):.2f}%")
         c4.metric("交易笔数", f"{int(stats.get('executed_trades', len(detail_df)))}")
+        if best_scan_overrides:
+            summary_text = ", ".join(
+                f"{SCAN_FIELD_LABELS.get(field_name, field_name) or field_name}={value}"
+                for field_name, value in best_scan_overrides.items()
+            )
+            st.caption(f"最佳参数组合：{summary_text}")
         st.download_button(
             "导出 Excel",
             data=st.session_state["excel_bytes"],
@@ -497,6 +937,57 @@ if isinstance(detail_df, pd.DataFrame) and "excel_bytes" in st.session_state:
         if isinstance(detail_df, pd.DataFrame) and not detail_df.empty:
             st.dataframe(format_detail_for_display(detail_df), hide_index=True)
             csv_bytes = detail_df.to_csv(index=False).encode("utf-8-sig")
-            st.download_button("导出 CSV", data=csv_bytes, file_name="trade_details.csv", mime="text/csv")
+            st.download_button(
+                "导出 CSV",
+                data=csv_bytes,
+                file_name="trade_details.csv",
+                mime="text/csv",
+            )
         else:
             st.info("暂无交易明细")
+
+    if len(tabs) == 4:
+        with tabs[3]:
+            st.dataframe(format_scan_for_display(scan_df), hide_index=True)
+            if len(scan_axis_fields) == 2:
+                pivot = scan_df.pivot(
+                    index=scan_axis_fields[1],
+                    columns=scan_axis_fields[0],
+                    values=scan_metric,
+                )
+                fig = px.imshow(
+                    pivot,
+                    text_auto=True if pivot.size <= 36 else False,
+                    aspect="auto",
+                    labels={
+                        "x": SCAN_FIELD_LABELS.get(
+                            scan_axis_fields[0], scan_axis_fields[0]
+                        )
+                        or scan_axis_fields[0],
+                        "y": SCAN_FIELD_LABELS.get(
+                            scan_axis_fields[1], scan_axis_fields[1]
+                        )
+                        or scan_axis_fields[1],
+                        "color": SCAN_METRIC_LABELS.get(scan_metric, scan_metric)
+                        or scan_metric,
+                    },
+                )
+                fig.update_xaxes(side="top")
+                st.plotly_chart(fig, use_container_width=True)
+            elif len(scan_axis_fields) == 1:
+                chart_df = scan_df.sort_values(scan_axis_fields[0]).copy()
+                fig = px.line(
+                    chart_df,
+                    x=scan_axis_fields[0],
+                    y=scan_metric,
+                    markers=True,
+                    labels={
+                        scan_axis_fields[0]: SCAN_FIELD_LABELS.get(
+                            scan_axis_fields[0], scan_axis_fields[0]
+                        )
+                        or scan_axis_fields[0],
+                        scan_metric: SCAN_METRIC_LABELS.get(scan_metric, scan_metric)
+                        or scan_metric,
+                    },
+                )
+                st.plotly_chart(fig, use_container_width=True)
