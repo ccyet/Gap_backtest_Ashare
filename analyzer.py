@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from collections import Counter
+from itertools import product
 import json
 
 import pandas as pd
 
-from models import AnalysisParams
+from models import AnalysisParams, apply_scan_overrides
 from rules import apply_gap_filters, simulate_trade
 
 
@@ -63,6 +64,21 @@ EQUITY_COLUMNS = [
     "event",
 ]
 
+SCAN_RESULT_COLUMNS = [
+    "scan_id",
+    "rank",
+    "signal_count",
+    "closed_trade_candidates",
+    "executed_trades",
+    "strategy_win_rate_pct",
+    "total_return_pct",
+    "max_drawdown_pct",
+    "final_net_value",
+    "avg_holding_days",
+    "profit_risk_ratio",
+    "trade_return_volatility_pct",
+]
+
 
 def _empty_scan_stats() -> dict[str, int]:
     return {
@@ -92,7 +108,9 @@ def _empty_strategy_stats() -> dict[str, float]:
     }
 
 
-def scan_trade_candidates(all_data: pd.DataFrame, params: AnalysisParams) -> tuple[pd.DataFrame, dict[str, int]]:
+def scan_trade_candidates(
+    all_data: pd.DataFrame, params: AnalysisParams
+) -> tuple[pd.DataFrame, dict[str, int]]:
     if all_data.empty:
         return pd.DataFrame(columns=BASE_DETAIL_COLUMNS), _empty_scan_stats()
 
@@ -110,7 +128,9 @@ def scan_trade_candidates(all_data: pd.DataFrame, params: AnalysisParams) -> tup
 
         for signal_idx in signal_indices:
             direction = "long" if params.gap_direction == "up" else "short"
-            trade, skip_reason = simulate_trade(enriched, signal_idx, params, direction=direction)
+            trade, skip_reason = simulate_trade(
+                enriched, signal_idx, params, direction=direction
+            )
             if trade is None:
                 if skip_reason == "insufficient_future":
                     stats["skipped_insufficient_future"] += 1
@@ -125,10 +145,15 @@ def scan_trade_candidates(all_data: pd.DataFrame, params: AnalysisParams) -> tup
             if total_weight <= 0:
                 stats["skipped_no_exit"] += 1
                 continue
-            trade["sell_price"] = sum(float(fill["sell_price"]) * float(fill["weight"]) for fill in fills) / total_weight
+            trade["sell_price"] = (
+                sum(float(fill["sell_price"]) * float(fill["weight"]) for fill in fills)
+                / total_weight
+            )
             trade["sell_date"] = fills[-1]["sell_date"]
             trade["exit_type"] = "+".join(str(fill["exit_type"]) for fill in fills)
-            trade["gross_return_pct"] = (trade["sell_price"] / float(trade["buy_price"]) - 1.0) * 100.0
+            trade["gross_return_pct"] = (
+                trade["sell_price"] / float(trade["buy_price"]) - 1.0
+            ) * 100.0
             trade["fill_count"] = len(fills)
             trade["fill_detail_json"] = json.dumps(fills, ensure_ascii=False)
             detail_records.append(trade)
@@ -138,11 +163,15 @@ def scan_trade_candidates(all_data: pd.DataFrame, params: AnalysisParams) -> tup
     if detail_df.empty:
         return detail_df, {**_empty_scan_stats(), **dict(stats)}
 
-    detail_df = detail_df.sort_values(["date", "stock_code", "sell_date"]).reset_index(drop=True)
+    detail_df = detail_df.sort_values(["date", "stock_code", "sell_date"]).reset_index(
+        drop=True
+    )
     return detail_df, {**_empty_scan_stats(), **dict(stats)}
 
 
-def build_strategy_trades(candidate_df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, float]]:
+def build_strategy_trades(
+    candidate_df: pd.DataFrame,
+) -> tuple[pd.DataFrame, dict[str, float]]:
     if candidate_df.empty:
         return pd.DataFrame(columns=DETAIL_COLUMNS), _empty_strategy_stats()
 
@@ -152,7 +181,9 @@ def build_strategy_trades(candidate_df: pd.DataFrame) -> tuple[pd.DataFrame, dic
     current_nav = 1.0
     trade_no = 0
 
-    sorted_candidates = candidate_df.sort_values(["date", "stock_code", "sell_date"]).reset_index(drop=True)
+    sorted_candidates = candidate_df.sort_values(
+        ["date", "stock_code", "sell_date"]
+    ).reset_index(drop=True)
 
     for record in sorted_candidates.to_dict("records"):
         buy_date = pd.to_datetime(record["date"])
@@ -164,7 +195,9 @@ def build_strategy_trades(candidate_df: pd.DataFrame) -> tuple[pd.DataFrame, dic
 
         trade_no += 1
         nav_before_trade = current_nav
-        nav_after_trade = nav_before_trade * (1.0 + float(record["net_return_pct"]) / 100.0)
+        nav_after_trade = nav_before_trade * (
+            1.0 + float(record["net_return_pct"]) / 100.0
+        )
 
         strategy_record = {
             **record,
@@ -194,12 +227,16 @@ def build_strategy_trades(candidate_df: pd.DataFrame) -> tuple[pd.DataFrame, dic
         stats["profit_risk_ratio"] = 0.0
     else:
         stats["profit_risk_ratio"] = stats["avg_mfe_pct"] / abs(stats["avg_mae_pct"])
-    stats["trade_return_volatility_pct"] = float(strategy_df["net_return_pct"].std(ddof=0))
+    stats["trade_return_volatility_pct"] = float(
+        strategy_df["net_return_pct"].std(ddof=0)
+    )
 
     return strategy_df, {**_empty_strategy_stats(), **dict(stats)}
 
 
-def build_equity_curve(all_data: pd.DataFrame, strategy_df: pd.DataFrame, params: AnalysisParams) -> pd.DataFrame:
+def build_equity_curve(
+    all_data: pd.DataFrame, strategy_df: pd.DataFrame, params: AnalysisParams
+) -> pd.DataFrame:
     start_ts = pd.to_datetime(params.start_date)
     end_ts = pd.to_datetime(params.end_date)
 
@@ -208,7 +245,10 @@ def build_equity_curve(all_data: pd.DataFrame, strategy_df: pd.DataFrame, params
         if not all_data.empty:
             market_dates = sorted(
                 timestamp
-                for timestamp in pd.to_datetime(all_data["date"]).dropna().unique().tolist()
+                for timestamp in pd.to_datetime(all_data["date"])
+                .dropna()
+                .unique()
+                .tolist()
                 if start_ts <= pd.Timestamp(timestamp) <= end_ts
             ) or [start_ts]
         equity_df = pd.DataFrame(
@@ -238,8 +278,12 @@ def build_equity_curve(all_data: pd.DataFrame, strategy_df: pd.DataFrame, params
 
     close_lookup: dict[tuple[str, pd.Timestamp], float] = {}
     if not all_data.empty:
-        for row in all_data[["stock_code", "date", "close"]].dropna().itertuples(index=False):
-            close_lookup[(str(row.stock_code), pd.Timestamp(row.date).normalize())] = float(row.close)
+        for row in (
+            all_data[["stock_code", "date", "close"]].dropna().itertuples(index=False)
+        ):
+            close_lookup[(str(row.stock_code), pd.Timestamp(row.date).normalize())] = (
+                float(row.close)
+            )
 
     trades = strategy_df.sort_values("date").to_dict("records")
     trade_index = 0
@@ -298,7 +342,9 @@ def build_equity_curve(all_data: pd.DataFrame, strategy_df: pd.DataFrame, params
                 trade_state["realized_value"] += fill_weight * fill_price
                 trade_state["remaining_weight"] -= fill_weight
                 fill_exit = str(fill.get("exit_type", "fill"))
-                event_label = fill_exit if not event_label else f"{event_label}+{fill_exit}"
+                event_label = (
+                    fill_exit if not event_label else f"{event_label}+{fill_exit}"
+                )
                 event_trade_no = int(active_trade["trade_no"])
                 event_stock_code = stock_code
                 trade_state["fill_idx"] += 1
@@ -336,8 +382,12 @@ def build_equity_curve(all_data: pd.DataFrame, strategy_df: pd.DataFrame, params
             }
         )
 
-    equity_df = pd.DataFrame(curve_records, columns=["date", "net_value", "trade_no", "stock_code", "event"])
-    equity_df["drawdown_pct"] = (equity_df["net_value"] / equity_df["net_value"].cummax() - 1.0) * 100.0
+    equity_df = pd.DataFrame(
+        curve_records, columns=["date", "net_value", "trade_no", "stock_code", "event"]
+    )
+    equity_df["drawdown_pct"] = (
+        equity_df["net_value"] / equity_df["net_value"].cummax() - 1.0
+    ) * 100.0
     return equity_df[EQUITY_COLUMNS]
 
 
@@ -355,6 +405,98 @@ def analyze_all_stocks(
 
     combined_stats: dict[str, float] = {**scan_stats, **strategy_stats}
     return strategy_df, daily_df, equity_df, combined_stats
+
+
+def run_parameter_scan(
+    all_data: pd.DataFrame,
+    params: AnalysisParams,
+) -> tuple[
+    pd.DataFrame,
+    pd.DataFrame,
+    pd.DataFrame,
+    pd.DataFrame,
+    dict[str, float],
+    dict[str, int | float],
+]:
+    scan_config = params.scan_config
+    if not scan_config.enabled or not scan_config.axes:
+        detail_df, daily_df, equity_df, stats = analyze_all_stocks(all_data, params)
+        return pd.DataFrame(), detail_df, daily_df, equity_df, stats, {}
+
+    field_names = [axis.field_name for axis in scan_config.axes]
+    value_product = product(*(axis.values for axis in scan_config.axes))
+    result_rows: list[dict[str, int | float]] = []
+    best_payload: (
+        tuple[
+            pd.DataFrame,
+            pd.DataFrame,
+            pd.DataFrame,
+            dict[str, float],
+            dict[str, int | float],
+        ]
+        | None
+    ) = None
+    best_metric_value: float | None = None
+    lower_is_better = scan_config.metric in {
+        "max_drawdown_pct",
+        "trade_return_volatility_pct",
+        "avg_holding_days",
+    }
+
+    for scan_id, combo in enumerate(value_product, start=1):
+        overrides = {
+            field_name: value
+            for field_name, value in zip(field_names, combo, strict=True)
+        }
+        scan_params = apply_scan_overrides(params, overrides)
+        detail_df, daily_df, equity_df, stats = analyze_all_stocks(
+            all_data, scan_params
+        )
+        metric_value = float(stats.get(scan_config.metric, 0.0))
+        row: dict[str, int | float] = {"scan_id": scan_id, **overrides}
+        for column in SCAN_RESULT_COLUMNS:
+            if column in {"scan_id", "rank"}:
+                continue
+            row[column] = float(stats.get(column, 0.0))
+        result_rows.append(row)
+
+        if best_payload is None:
+            best_payload = (detail_df, daily_df, equity_df, stats, overrides)
+            best_metric_value = metric_value
+            continue
+
+        assert best_metric_value is not None
+        if lower_is_better:
+            should_replace = metric_value < best_metric_value
+        else:
+            should_replace = metric_value > best_metric_value
+        if should_replace:
+            best_payload = (detail_df, daily_df, equity_df, stats, overrides)
+            best_metric_value = metric_value
+
+    scan_df = pd.DataFrame(result_rows)
+    if scan_df.empty or best_payload is None:
+        detail_df, daily_df, equity_df, stats = analyze_all_stocks(all_data, params)
+        return pd.DataFrame(), detail_df, daily_df, equity_df, stats, {}
+
+    sort_ascending = lower_is_better
+    scan_df = scan_df.sort_values(
+        [scan_config.metric, "scan_id"], ascending=[sort_ascending, True]
+    ).reset_index(drop=True)
+    scan_df["rank"] = range(1, len(scan_df) + 1)
+
+    ordered_columns = (
+        ["scan_id"]
+        + field_names
+        + [
+            column
+            for column in SCAN_RESULT_COLUMNS
+            if column not in {"scan_id", "rank"}
+        ]
+        + ["rank"]
+    )
+    detail_df, daily_df, equity_df, stats, overrides = best_payload
+    return scan_df[ordered_columns], detail_df, daily_df, equity_df, stats, overrides
 
 
 def build_daily_summary(detail_df: pd.DataFrame) -> pd.DataFrame:
