@@ -142,6 +142,11 @@ SCAN_COLUMN_LABELS = {
     "profit_risk_ratio": "收益风险比",
     "trade_return_volatility_pct": "单笔收益波动率",
 }
+PARTIAL_EXIT_MODE_LABELS = {
+    "fixed_tp": "固定止盈",
+    "ma_exit": "均线离场",
+    "profit_drawdown": "利润回撤",
+}
 SUMMARY_COLUMN_LABELS = {
     "date": "开仓日期",
     "signal_count": "信号数",
@@ -716,25 +721,25 @@ with st.expander("本地行情更新（离线下载）", expanded=False):
 st.divider()
 
 # ===== Sidebar: 基础参数 =====
-st.sidebar.header("基础参数")
-st.sidebar.caption("左侧只放发起回测所需的核心输入，详细规则放在主区域。")
+st.sidebar.header("运行设置")
+st.sidebar.caption("左侧聚焦回测范围与数据源选择，详细规则放在主区域。")
+st.sidebar.markdown("**回测范围**")
 stock_scope_text = st.sidebar.text_area(
     "股票池", value="", help="多个代码可用逗号/空格/换行。留空表示全市场。"
 )
-start_date = st.sidebar.date_input("回测开始", value=default_backtest_start)
-end_date = st.sidebar.date_input("回测结束", value=today)
+sidebar_date_cols = st.sidebar.columns(2)
+start_date = sidebar_date_cols[0].date_input("回测开始", value=default_backtest_start)
+end_date = sidebar_date_cols[1].date_input("回测结束", value=today)
 SOURCE_LABEL_TO_TYPE = {
     "本地 Parquet（AKShare 离线）": "local_parquet",
     "Excel/CSV 文件": "file",
     "SQLite 数据库": "sqlite",
 }
+st.sidebar.markdown("**数据源**")
 data_source_label = st.sidebar.selectbox(
     "数据源", options=list(SOURCE_LABEL_TO_TYPE.keys())
 )
 adjust_label = st.sidebar.selectbox("复权方式", options=["qfq", "hfq"], index=0)
-submitted = st.sidebar.button("开始回测", type="primary")
-st.sidebar.divider()
-st.sidebar.caption("数据源补充信息")
 
 # 数据源输入（仍放侧边栏，保持小白可见）
 default_db_path = str(Path.cwd() / "market_data.sqlite")
@@ -744,20 +749,25 @@ input_file_path = ""
 excel_sheet_name = ""
 uploaded_market_file = None
 
-local_data_root = st.sidebar.text_input(
-    "本地 Parquet 根目录", value="data/market/daily"
-)
-if data_source_label == "SQLite 数据库":
-    db_path = st.sidebar.text_input("SQLite 路径", value=default_db_path)
-    table_name = st.sidebar.text_input("表名（可选）", value="")
-elif data_source_label == "Excel/CSV 文件":
-    uploaded_market_file = st.sidebar.file_uploader(
-        "上传行情文件", type=["xlsx", "xlsm", "csv"]
-    )
-    input_file_path = st.sidebar.text_input("或本地文件路径（可选）", value="")
-    excel_sheet_name = st.sidebar.text_input("工作表（Excel 可选）", value="")
-else:
-    st.sidebar.caption("当前使用本地 parquet 数据源，回测将直接读取本地目录。")
+with st.sidebar.expander(
+    "数据源附加设置",
+    expanded=data_source_label != "本地 Parquet（AKShare 离线）",
+):
+    local_data_root = st.text_input("本地 Parquet 根目录", value="data/market/daily")
+    if data_source_label == "SQLite 数据库":
+        db_path = st.text_input("SQLite 路径", value=default_db_path)
+        table_name = st.text_input("表名（可选）", value="")
+    elif data_source_label == "Excel/CSV 文件":
+        uploaded_market_file = st.file_uploader(
+            "上传行情文件", type=["xlsx", "xlsm", "csv"]
+        )
+        input_file_path = st.text_input("或本地文件路径（可选）", value="")
+        excel_sheet_name = st.text_input("工作表（Excel 可选）", value="")
+    else:
+        st.caption("当前使用本地 parquet 数据源，回测将直接读取本地目录。")
+
+submitted = st.sidebar.button("开始回测", type="primary")
+st.sidebar.caption("结果会在当前页面下方的标签页中展示。")
 
 # ===== 主界面：配置摘要 =====
 section_header(
@@ -779,23 +789,18 @@ summary_cols[0].metric(
     "做多"
     if st.session_state.get("direction_label", "向上跳空") == "向上跳空"
     else "做空",
-    border=True,
 )
-summary_cols[1].metric("股票池", summarize_stock_scope(stock_scope_text), border=True)
-summary_cols[2].metric("回测区间", f"{start_date} → {end_date}", border=True)
+summary_cols[1].metric("股票池", summarize_stock_scope(stock_scope_text))
+summary_cols[2].metric("回测区间", f"{start_date} → {end_date}")
 summary_cols_2 = st.columns(3)
-summary_cols_2[0].metric(
-    "数据源", source_summary_title, source_summary_desc, border=True
-)
+summary_cols_2[0].metric("数据源", source_summary_title, source_summary_desc)
 summary_cols_2[1].metric(
     "分批退出",
     "开启" if st.session_state.get("partial_exit_enabled", False) else "关闭",
-    border=True,
 )
 summary_cols_2[2].metric(
     "时间退出",
     "开启" if st.session_state.get("use_time_stop", True) else "关闭",
-    border=True,
 )
 
 st.divider()
@@ -804,93 +809,113 @@ section_header("策略配置", "核心参数默认展开，高级参数保持次
 # ===== 主界面：规则配置 =====
 with st.expander("⚙️ 核心交易规则配置", expanded=True):
     st.caption("优先配置开仓、止损止盈、时间退出与交易成本。")
-    direction_label = st.selectbox(
-        "交易方向", options=["向上跳空", "向下跳空"], key="direction_label"
-    )
-    gap_entry_mode = st.selectbox(
-        "开仓信号模式",
-        options=list(GAP_ENTRY_MODES),
-        format_func=lambda value: (
-            "严格突破前高/前低" if value == "strict_break" else "开盘相对昨收达到阈值"
-        ),
-    )
-    gap_pct = st.number_input("跳空幅度（%）", min_value=0.0, value=2.0, step=0.1)
-    max_gap_filter_pct = st.number_input(
-        "最大高开/低开过滤（%）", min_value=0.0, value=9.9, step=0.1
-    )
+    core_entry_col, core_exit_col = st.columns(2)
+    with core_entry_col:
+        st.markdown("**信号与入场**")
+        st.caption("定义跳空方向、阈值与入场过滤条件。")
+        entry_top_cols = st.columns([1, 1.6])
+        direction_label = entry_top_cols[0].selectbox(
+            "交易方向", options=["向上跳空", "向下跳空"], key="direction_label"
+        )
+        gap_entry_mode = entry_top_cols[1].selectbox(
+            "开仓模式",
+            options=list(GAP_ENTRY_MODES),
+            format_func=lambda value: (
+                "严格突破前高/前低" if value == "strict_break" else "开盘相对昨收达阈值"
+            ),
+        )
+        gap_cols = st.columns(2)
+        gap_pct = gap_cols[0].number_input(
+            "跳空幅度（%）", min_value=0.0, value=2.0, step=0.1
+        )
+        max_gap_filter_pct = gap_cols[1].number_input(
+            "最大高开/低开过滤（%）", min_value=0.0, value=9.9, step=0.1
+        )
+        use_ma_filter = st.checkbox("启用快慢线开单过滤", value=False)
+        ma_filter_cols = st.columns(2)
+        fast_ma_period = ma_filter_cols[0].number_input(
+            "快线周期", min_value=1, value=5, step=1, disabled=not use_ma_filter
+        )
+        slow_ma_period = ma_filter_cols[1].number_input(
+            "慢线周期", min_value=1, value=20, step=1, disabled=not use_ma_filter
+        )
 
-    use_ma_filter = st.checkbox("启用快慢线开单过滤", value=False)
-    c1, c2 = st.columns(2)
-    fast_ma_period = c1.number_input(
-        "快线周期", min_value=1, value=5, step=1, disabled=not use_ma_filter
-    )
-    slow_ma_period = c2.number_input(
-        "慢线周期", min_value=1, value=20, step=1, disabled=not use_ma_filter
-    )
+    with core_exit_col:
+        st.markdown("**退出与风控**")
+        st.caption("整笔退出保留在这里，分批止盈放到下方进阶设置。")
+        use_time_stop = st.checkbox("启用时间退出", value=True, key="use_time_stop")
+        time_stop_cols = st.columns(2)
+        time_stop_days = time_stop_cols[0].number_input(
+            "最多持有天数 N", min_value=1, value=5, step=1, disabled=not use_time_stop
+        )
+        time_stop_target_pct = time_stop_cols[1].number_input(
+            "时间退出收益阈值（%）", value=1.0, step=0.1, disabled=not use_time_stop
+        )
+        exit_mode_cols = st.columns([1.8, 1])
+        time_exit_mode_label = exit_mode_cols[0].selectbox(
+            "到期处理",
+            options=["按原规则剔除未达条件信号", "第 N 天按收盘价结束交易"],
+        )
+        stop_loss_pct = exit_mode_cols[1].number_input(
+            "全仓止损（%）", min_value=0.0, value=3.0, step=0.1
+        )
+        take_profit_cols = st.columns(2)
+        enable_take_profit = take_profit_cols[0].checkbox("启用固定止盈", value=True)
+        take_profit_pct = take_profit_cols[1].number_input(
+            "固定止盈（%）",
+            min_value=0.0,
+            value=5.0,
+            step=0.1,
+            disabled=not enable_take_profit,
+        )
+        drawdown_cols = st.columns(2)
+        enable_profit_drawdown_exit = drawdown_cols[0].checkbox(
+            "启用盈利回撤止盈（整笔）", value=False
+        )
+        profit_drawdown_pct = drawdown_cols[1].number_input(
+            "盈利回撤（%）",
+            min_value=0.0,
+            value=40.0,
+            step=1.0,
+            disabled=not enable_profit_drawdown_exit,
+        )
+        ma_exit_cols = st.columns(2)
+        enable_ma_exit = ma_exit_cols[0].checkbox("启用均线离场（整笔）", value=False)
+        exit_ma_period = ma_exit_cols[1].number_input(
+            "离场均线周期", min_value=1, value=10, step=1, disabled=not enable_ma_exit
+        )
+        ma_exit_batches = st.number_input(
+            "均线离场分批数",
+            min_value=2,
+            max_value=3,
+            value=2,
+            step=1,
+            disabled=not enable_ma_exit,
+        )
 
-    use_time_stop = st.checkbox("启用时间退出", value=True, key="use_time_stop")
-    c3, c4 = st.columns(2)
-    time_stop_days = c3.number_input(
-        "最多持有天数 N", min_value=1, value=5, step=1, disabled=not use_time_stop
-    )
-    time_stop_target_pct = c4.number_input(
-        "时间退出收益阈值（%）", value=1.0, step=0.1, disabled=not use_time_stop
-    )
-    time_exit_mode_label = st.selectbox(
-        "数据结束处理", options=["按原规则剔除未达条件信号", "第 N 天按收盘价结束交易"]
-    )
-
-    stop_loss_pct = st.number_input("全仓止损（%）", min_value=0.0, value=3.0, step=0.1)
-    enable_take_profit = st.checkbox("启用固定止盈", value=True)
-    take_profit_pct = st.number_input(
-        "固定止盈（%）",
-        min_value=0.0,
-        value=5.0,
-        step=0.1,
-        disabled=not enable_take_profit,
-    )
-
-    enable_profit_drawdown_exit = st.checkbox("启用盈利回撤止盈（整笔）", value=False)
-    profit_drawdown_pct = st.number_input(
-        "盈利回撤（%）",
-        min_value=0.0,
-        value=40.0,
-        step=1.0,
-        disabled=not enable_profit_drawdown_exit,
-    )
-
-    enable_ma_exit = st.checkbox("启用均线离场（整笔）", value=False)
-    exit_ma_period = st.number_input(
-        "离场均线周期", min_value=1, value=10, step=1, disabled=not enable_ma_exit
-    )
-    ma_exit_batches = st.number_input(
-        "均线离场分批数",
-        min_value=2,
-        max_value=3,
-        value=2,
-        step=1,
-        disabled=not enable_ma_exit,
-    )
-
-    buy_cost_pct = st.number_input(
+    st.markdown("**交易成本与执行**")
+    st.caption("保持成本、滑点等执行参数集中展示，便于快速核对。")
+    cost_cols = st.columns(4)
+    buy_cost_pct = cost_cols[0].number_input(
         "买入成本（%）", min_value=0.0, value=0.03, step=0.01, format="%.4f"
     )
-    sell_cost_pct = st.number_input(
+    sell_cost_pct = cost_cols[1].number_input(
         "卖出成本（%）", min_value=0.0, value=0.13, step=0.01, format="%.4f"
     )
-    buy_slippage_pct = st.number_input(
+    buy_slippage_pct = cost_cols[2].number_input(
         "买入滑点（%）", min_value=0.0, value=0.0, step=0.01, format="%.4f"
     )
-    sell_slippage_pct = st.number_input(
+    sell_slippage_pct = cost_cols[3].number_input(
         "卖出滑点（%）", min_value=0.0, value=0.0, step=0.01, format="%.4f"
     )
 
 with st.expander("🛠️ 分批止盈高级配置", expanded=False):
     st.caption("仅在需要拆分仓位管理时启用，按 priority 从小到大执行。")
-    partial_exit_enabled = st.checkbox(
+    partial_top_cols = st.columns([1, 1])
+    partial_exit_enabled = partial_top_cols[0].checkbox(
         "启用分批止盈", value=False, key="partial_exit_enabled"
     )
-    partial_exit_count = st.number_input(
+    partial_exit_count = partial_top_cols[1].number_input(
         "分批数量",
         min_value=2,
         max_value=3,
@@ -901,7 +926,7 @@ with st.expander("🛠️ 分批止盈高级配置", expanded=False):
     partial_rule_inputs = []
     for i in range(1, int(partial_exit_count) + 1):
         with st.expander(f"第 {i} 批", expanded=(i <= 2)):
-            c1, c2 = st.columns(2)
+            c1, c2, c3 = st.columns([1, 1.25, 1.1])
             weight_default = (
                 50.0 if int(partial_exit_count) == 2 else [30.0, 30.0, 40.0][i - 1]
             )
@@ -911,7 +936,7 @@ with st.expander("🛠️ 分批止盈高级配置", expanded=False):
                 else ["fixed_tp", "fixed_tp", "ma_exit"][i - 1]
             )
             weight_pct = c1.number_input(
-                f"第{i}批 仓位比例%",
+                f"仓位比例（第{i}批）",
                 min_value=0.0,
                 max_value=100.0,
                 value=weight_default,
@@ -920,7 +945,7 @@ with st.expander("🛠️ 分批止盈高级配置", expanded=False):
                 key=f"p_weight_{i}",
             )
             priority = c1.number_input(
-                f"第{i}批 priority",
+                f"执行优先级（第{i}批）",
                 min_value=1,
                 max_value=10,
                 value=i,
@@ -929,37 +954,40 @@ with st.expander("🛠️ 分批止盈高级配置", expanded=False):
                 key=f"p_priority_{i}",
             )
             mode = c2.selectbox(
-                f"第{i}批 退出方式",
+                f"退出方式（第{i}批）",
                 options=["fixed_tp", "ma_exit", "profit_drawdown"],
                 index=["fixed_tp", "ma_exit", "profit_drawdown"].index(mode_default),
+                format_func=lambda value: str(
+                    PARTIAL_EXIT_MODE_LABELS.get(value, value) or value
+                ),
                 disabled=not partial_exit_enabled,
                 key=f"p_mode_{i}",
             )
-            tp = st.number_input(
-                f"第{i}批 目标收益%",
+            tp = c3.number_input(
+                f"目标收益（第{i}批）%",
                 value=5.0,
                 step=0.1,
                 disabled=(not partial_exit_enabled) or mode != "fixed_tp",
                 key=f"p_tp_{i}",
             )
-            ma = st.number_input(
-                f"第{i}批 均线周期",
+            ma = c3.number_input(
+                f"均线周期（第{i}批）",
                 min_value=1,
                 value=10,
                 step=1,
                 disabled=(not partial_exit_enabled) or mode != "ma_exit",
                 key=f"p_ma_{i}",
             )
-            dd = st.number_input(
-                f"第{i}批 回撤比例%",
+            dd = c3.number_input(
+                f"回撤比例（第{i}批）%",
                 min_value=0.0,
                 value=20.0,
                 step=0.1,
                 disabled=(not partial_exit_enabled) or mode != "profit_drawdown",
                 key=f"p_dd_{i}",
             )
-            mpa = st.number_input(
-                f"第{i}批 最小浮盈激活%",
+            mpa = c2.number_input(
+                f"激活浮盈（第{i}批）%",
                 min_value=0.0,
                 value=5.0,
                 step=0.1,
@@ -983,54 +1011,62 @@ with st.expander("🛠️ 分批止盈高级配置", expanded=False):
 
 with st.expander("🔎 参数敏感性扫描", expanded=False):
     st.caption("适合做参数边界探索；建议先用少量组合验证，再扩大扫描范围。")
-    scan_enabled = st.checkbox("启用参数扫描", value=False)
-    scan_metric = st.selectbox(
-        "扫描排序指标",
-        options=list(SCAN_METRICS),
-        format_func=lambda value: str(SCAN_METRIC_LABELS.get(value, value) or value),
-        disabled=not scan_enabled,
-    )
+    scan_top_cols = st.columns([1.6, 1])
+    with scan_top_cols[0]:
+        scan_enabled = st.checkbox("启用参数扫描", value=False)
+        scan_metric = st.selectbox(
+            "扫描排序指标",
+            options=list(SCAN_METRICS),
+            format_func=lambda value: str(
+                SCAN_METRIC_LABELS.get(value, value) or value
+            ),
+            disabled=not scan_enabled,
+        )
+    with scan_top_cols[1]:
+        scan_max_combinations = st.number_input(
+            "最大组合数",
+            min_value=1,
+            max_value=100,
+            value=25,
+            step=1,
+            disabled=not scan_enabled,
+        )
     scan_field_options = [""] + list(SCAN_FIELD_CASTERS.keys())
-    scan_axis_1 = st.selectbox(
-        "扫描维度 1",
-        options=scan_field_options,
-        format_func=lambda value: str(
-            "请选择字段"
-            if value == ""
-            else (SCAN_FIELD_LABELS.get(value, value) or value)
-        ),
-        disabled=not scan_enabled,
-    )
-    scan_axis_1_values = st.text_input(
-        "维度 1 取值",
-        value="",
-        disabled=not scan_enabled,
-        help="使用逗号分隔，例如 2,3,4",
-    )
-    scan_axis_2 = st.selectbox(
-        "扫描维度 2（可选）",
-        options=scan_field_options,
-        format_func=lambda value: str(
-            "不启用第二维"
-            if value == ""
-            else (SCAN_FIELD_LABELS.get(value, value) or value)
-        ),
-        disabled=not scan_enabled,
-    )
-    scan_axis_2_values = st.text_input(
-        "维度 2 取值",
-        value="",
-        disabled=not scan_enabled,
-        help="留空表示只扫描一维",
-    )
-    scan_max_combinations = st.number_input(
-        "最大组合数",
-        min_value=1,
-        max_value=100,
-        value=25,
-        step=1,
-        disabled=not scan_enabled,
-    )
+    scan_axis_cols = st.columns(2)
+    with scan_axis_cols[0]:
+        scan_axis_1 = st.selectbox(
+            "扫描维度 1",
+            options=scan_field_options,
+            format_func=lambda value: str(
+                "请选择字段"
+                if value == ""
+                else (SCAN_FIELD_LABELS.get(value, value) or value)
+            ),
+            disabled=not scan_enabled,
+        )
+        scan_axis_1_values = st.text_input(
+            "维度 1 取值",
+            value="",
+            disabled=not scan_enabled,
+            help="使用逗号分隔，例如 2,3,4",
+        )
+    with scan_axis_cols[1]:
+        scan_axis_2 = st.selectbox(
+            "扫描维度 2（可选）",
+            options=scan_field_options,
+            format_func=lambda value: str(
+                "不启用第二维"
+                if value == ""
+                else (SCAN_FIELD_LABELS.get(value, value) or value)
+            ),
+            disabled=not scan_enabled,
+        )
+        scan_axis_2_values = st.text_input(
+            "维度 2 取值",
+            value="",
+            disabled=not scan_enabled,
+            help="留空表示只扫描一维",
+        )
 
 # 字段映射
 with st.expander("字段映射（可选）", expanded=False):
@@ -1226,6 +1262,7 @@ if isinstance(detail_df, pd.DataFrame) and "excel_bytes" in st.session_state:
                 for field_name, value in best_scan_overrides.items()
             )
             st.caption(f"最佳参数组合：{summary_text}")
+        st.caption("按开仓日汇总保留在同一标签页，便于从总览直接下钻到日度表现。")
         if isinstance(daily_df, pd.DataFrame) and not daily_df.empty:
             st.markdown("**按开仓日汇总**")
             dataframe_stretch(
@@ -1246,8 +1283,10 @@ if isinstance(detail_df, pd.DataFrame) and "excel_bytes" in st.session_state:
             section_header("净值与回撤", "默认展示净值曲线，并保留表格视图便于核对。")
             chart_df = equity_df.copy()
             chart_df["date"] = pd.to_datetime(chart_df["date"])
-            fig = px.line(chart_df, x="date", y="net_value", title="资金曲线")
+            fig = px.line(chart_df, x="date", y="net_value")
+            fig.update_layout(margin=dict(l=0, r=0, t=16, b=0))
             st.plotly_chart(fig, use_container_width=True)
+            st.caption("下表保留原始净值序列，适合与图形交叉核对。")
             dataframe_stretch(
                 format_equity_for_display(equity_df),
                 hide_index=True,
@@ -1260,6 +1299,14 @@ if isinstance(detail_df, pd.DataFrame) and "excel_bytes" in st.session_state:
     with tab_details:
         if isinstance(detail_df, pd.DataFrame) and not detail_df.empty:
             section_header("交易明细", "表头已转中文，优先展示交易关键信息与成交明细。")
+            detail_meta_cols = st.columns(3)
+            detail_meta_cols[0].metric("交易笔数", f"{len(detail_df)}")
+            detail_meta_cols[1].metric(
+                "平均持有天数", f"{float(stats.get('avg_holding_days', 0.0)):.2f}"
+            )
+            detail_meta_cols[2].metric(
+                "净收益中位数", f"{float(stats.get('median_net_return_pct', 0.0)):.2f}%"
+            )
             dataframe_stretch(
                 format_detail_for_display(detail_df),
                 hide_index=True,
@@ -1281,6 +1328,26 @@ if isinstance(detail_df, pd.DataFrame) and "excel_bytes" in st.session_state:
             section_header(
                 "参数扫描结果", "先看排名表，再看热力图/折线图判断参数敏感性。"
             )
+            scan_summary_cols = st.columns(3)
+            scan_summary_cols[0].metric("组合数", f"{len(scan_df)}")
+            scan_summary_cols[1].metric(
+                "排序指标",
+                str(SCAN_METRIC_LABELS.get(scan_metric, scan_metric) or scan_metric),
+            )
+            scan_summary_cols[2].metric(
+                "扫描维度",
+                " / ".join(
+                    str(SCAN_FIELD_LABELS.get(field_name, field_name) or field_name)
+                    for field_name in scan_axis_fields
+                )
+                or "未设置",
+            )
+            if best_scan_overrides:
+                scan_best_text = "，".join(
+                    f"{SCAN_FIELD_LABELS.get(field_name, field_name) or field_name}={value}"
+                    for field_name, value in best_scan_overrides.items()
+                )
+                st.caption(f"本次最优组合：{scan_best_text}")
             dataframe_stretch(
                 format_scan_for_display(scan_df),
                 hide_index=True,
@@ -1329,3 +1396,9 @@ if isinstance(detail_df, pd.DataFrame) and "excel_bytes" in st.session_state:
                     },
                 )
                 st.plotly_chart(fig, use_container_width=True)
+else:
+    st.divider()
+    section_header(
+        "结果区域", "运行回测后，这里会保留总览、曲线、明细和参数扫描标签页。"
+    )
+    st.info("请先在左侧确认回测范围与数据源，再点击“开始回测”。")
