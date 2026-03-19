@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pandas as pd
 
 from models import AnalysisParams, PartialExitRule, validate_params
 from rules import simulate_trade
 
 
-def make_params(**overrides):
-    base = dict(
+def make_params(**overrides: Any) -> AnalysisParams:
+    base: dict[str, Any] = dict(
         data_source_type="sqlite",
         db_path="/tmp/a.db",
         table_name=None,
@@ -42,6 +44,16 @@ def make_params(**overrides):
         sell_slippage_pct=0.0,
         time_exit_mode="strict",
     )
+    supported_fields = set(AnalysisParams.__dataclass_fields__)
+    optional_rollout_defaults = {
+        "entry_factor": "gap",
+        "trend_breakout_lookback": 2,
+        "vcb_range_lookback": 2,
+        "vcb_breakout_lookback": 2,
+    }
+    for field_name, field_value in optional_rollout_defaults.items():
+        if field_name in supported_fields:
+            base[field_name] = field_value
     base.update(overrides)
     return AnalysisParams(**base)
 
@@ -67,6 +79,12 @@ def make_stock_df(rows):
     return pd.DataFrame(data)
 
 
+def require_trade(trade: dict[str, Any] | None, reason: str | None) -> dict[str, Any]:
+    assert reason is None
+    assert trade is not None
+    return trade
+
+
 def test_time_exit_case_a_trigger_on_day_n_below_target():
     df = make_stock_df(
         [
@@ -86,7 +104,7 @@ def test_time_exit_case_a_trigger_on_day_n_below_target():
             stop_loss_pct=50.0,
         ),
     )
-    assert reason is None
+    trade = require_trade(trade, reason)
     assert trade["fills"][-1]["exit_type"] == "time_exit"
 
 
@@ -109,7 +127,7 @@ def test_time_exit_case_b_meet_target_then_other_rule_exit():
             stop_loss_pct=5.0,
         ),
     )
-    assert reason is None
+    trade = require_trade(trade, reason)
     assert trade["fills"][-1]["exit_type"] == "stop_loss"
 
 
@@ -132,7 +150,7 @@ def test_time_exit_case_c_fall_below_target_later():
             stop_loss_pct=50.0,
         ),
     )
-    assert reason is None
+    trade = require_trade(trade, reason)
     assert trade["fills"][-1]["exit_type"] == "time_exit"
     assert trade["fills"][-1]["holding_days"] == 3
 
@@ -162,7 +180,7 @@ def test_partial_case_d_two_batch_fixed_tp_then_ma_exit():
             stop_loss_pct=50.0,
         ),
     )
-    assert reason is None
+    trade = require_trade(trade, reason)
     assert [f["exit_type"] for f in trade["fills"]] == ["fixed_tp", "ma_exit"]
 
 
@@ -198,7 +216,7 @@ def test_partial_case_e_three_batch_with_drawdown():
             stop_loss_pct=50.0,
         ),
     )
-    assert reason is None
+    trade = require_trade(trade, reason)
     assert [f["exit_type"] for f in trade["fills"]] == [
         "fixed_tp",
         "fixed_tp",
@@ -222,7 +240,7 @@ def test_partial_case_f_stop_loss_has_highest_priority():
             stop_loss_pct=5.0,
         ),
     )
-    assert reason is None
+    trade = require_trade(trade, reason)
     assert len(trade["fills"]) == 1
     assert trade["fills"][0]["exit_type"] == "stop_loss"
 
@@ -243,7 +261,7 @@ def test_partial_case_g_same_day_two_fixed_tp_by_priority():
             stop_loss_pct=50.0,
         ),
     )
-    assert reason is None
+    trade = require_trade(trade, reason)
     assert trade["fills"][0]["sell_price"] == 102.0
     assert trade["fills"][1]["sell_price"] == 103.0
 
@@ -292,7 +310,7 @@ def test_partial_case_i_force_close_adds_fill():
             stop_loss_pct=50.0,
         ),
     )
-    assert reason is None
+    trade = require_trade(trade, reason)
     assert trade["fills"][-1]["exit_type"] == "force_close"
 
 
@@ -328,7 +346,7 @@ def test_partial_case_j_activation_threshold_prevents_drawdown_trigger():
             stop_loss_pct=50.0,
         ),
     )
-    assert reason is None
+    trade = require_trade(trade, reason)
     assert trade["fills"][-1]["exit_type"] == "time_exit"
 
 
@@ -380,7 +398,7 @@ def test_partial_case_l_drawdown_uses_updated_trailing_peak():
             time_stop_target_pct=-50.0,
         ),
     )
-    assert reason is None
+    trade = require_trade(trade, reason)
     assert trade["fills"][-1]["exit_type"] == "profit_drawdown"
     assert trade["fills"][-1]["holding_days"] == 3
     assert trade["fills"][-1]["sell_price"] == 116
@@ -394,7 +412,7 @@ def test_short_stop_loss_mirror():
         make_params(enable_take_profit=False, stop_loss_pct=5.0),
         direction="short",
     )
-    assert reason is None
+    trade = require_trade(trade, reason)
     assert trade["fills"][-1]["exit_type"] == "stop_loss"
 
 
@@ -406,7 +424,7 @@ def test_short_fixed_tp_mirror():
         make_params(enable_take_profit=True, take_profit_pct=5.0, stop_loss_pct=50.0),
         direction="short",
     )
-    assert reason is None
+    trade = require_trade(trade, reason)
     assert trade["fills"][-1]["exit_type"] == "take_profit"
 
 
@@ -429,7 +447,7 @@ def test_partial_exits_execute_before_same_day_time_exit():
             enable_take_profit=False,
         ),
     )
-    assert reason is None
+    trade = require_trade(trade, reason)
     assert [fill["exit_type"] for fill in trade["fills"]] == ["fixed_tp", "time_exit"]
 
 
@@ -446,7 +464,7 @@ def test_long_slippage_adjusts_entry_and_exit_prices():
             sell_slippage_pct=2.0,
         ),
     )
-    assert reason is None
+    trade = require_trade(trade, reason)
     assert abs(trade["buy_price"] - 101.0) < 1e-12
     assert abs(trade["fills"][-1]["sell_price"] - 102.9) < 1e-12
 
@@ -465,7 +483,7 @@ def test_short_slippage_adjusts_entry_and_cover_prices():
         ),
         direction="short",
     )
-    assert reason is None
+    trade = require_trade(trade, reason)
     assert abs(trade["buy_price"] - 98.0) < 1e-12
     assert abs(trade["fills"][-1]["sell_price"] - 95.95) < 1e-12
 
@@ -498,7 +516,8 @@ def test_slippage_does_not_change_partial_fixed_tp_trigger_timing():
             sell_slippage_pct=2.0,
         ),
     )
-    assert base_reason is None and slipped_reason is None
+    base_trade = require_trade(base_trade, base_reason)
+    slipped_trade = require_trade(slipped_trade, slipped_reason)
     assert (
         base_trade["fills"][-1]["holding_days"]
         == slipped_trade["fills"][-1]["holding_days"]
@@ -534,7 +553,8 @@ def test_slippage_does_not_change_whole_position_drawdown_trigger_timing():
             sell_slippage_pct=2.0,
         ),
     )
-    assert base_reason is None and slipped_reason is None
+    base_trade = require_trade(base_trade, base_reason)
+    slipped_trade = require_trade(slipped_trade, slipped_reason)
     assert (
         base_trade["fills"][-1]["exit_type"]
         == slipped_trade["fills"][-1]["exit_type"]
@@ -579,7 +599,7 @@ def test_partial_total_profit_drawdown_uses_locked_first_batch_profit():
             time_stop_target_pct=-50.0,
         ),
     )
-    assert reason is None
+    trade = require_trade(trade, reason)
     assert [fill["exit_type"] for fill in trade["fills"]] == [
         "fixed_tp",
         "profit_drawdown",
@@ -620,7 +640,7 @@ def test_total_profit_drawdown_can_trigger_when_peak_price_drawdown_would_not():
             time_stop_target_pct=-50.0,
         ),
     )
-    assert reason is None
+    trade = require_trade(trade, reason)
     assert trade["fills"][-1]["exit_type"] == "profit_drawdown"
     assert trade["fills"][-1]["holding_days"] == 2
     assert trade["fills"][-1]["sell_price"] == 135.0
@@ -659,7 +679,7 @@ def test_total_profit_drawdown_activation_uses_total_trade_peak_profit():
             time_exit_mode="force_close",
         ),
     )
-    assert reason is None
+    trade = require_trade(trade, reason)
     assert [fill["exit_type"] for fill in trade["fills"]] == ["fixed_tp", "force_close"]
 
 
@@ -694,7 +714,8 @@ def test_slippage_does_not_change_time_exit_trigger_timing():
             sell_slippage_pct=2.0,
         ),
     )
-    assert base_reason is None and slipped_reason is None
+    base_trade = require_trade(base_trade, base_reason)
+    slipped_trade = require_trade(slipped_trade, slipped_reason)
     assert (
         base_trade["fills"][-1]["exit_type"]
         == slipped_trade["fills"][-1]["exit_type"]

@@ -21,6 +21,8 @@ from data_loader import (
 from exporter import export_to_excel_bytes
 from models import (
     AnalysisParams,
+    ENTRY_FACTORS,
+    FACTOR_SCAN_ELIGIBLE_FIELDS,
     GAP_ENTRY_MODES,
     ParamScanAxis,
     ParamScanConfig,
@@ -78,6 +80,9 @@ EQUITY_PERCENT_COLUMNS = ["drawdown_pct"]
 SCAN_FIELD_LABELS = {
     "gap_pct": "跳空幅度",
     "max_gap_filter_pct": "最大高开/低开过滤",
+    "trend_breakout_lookback": "趋势突破回看天数",
+    "vcb_range_lookback": "波动收缩区间回看天数",
+    "vcb_breakout_lookback": "波动收缩突破回看天数",
     "time_stop_days": "最多持有天数",
     "time_stop_target_pct": "时间退出收益阈值",
     "stop_loss_pct": "全仓止损",
@@ -147,6 +152,31 @@ PARTIAL_EXIT_MODE_LABELS = {
     "ma_exit": "均线离场",
     "profit_drawdown": "利润回撤",
 }
+ENTRY_FACTOR_LABELS = {
+    "gap": "跳空",
+    "trend_breakout": "趋势突破",
+    "volatility_contraction_breakout": "波动收缩突破",
+}
+FACTOR_SPECIFIC_WIDGET_KEYS = {
+    "gap": ("gap_entry_mode", "gap_pct", "max_gap_filter_pct"),
+    "trend_breakout": ("trend_breakout_lookback",),
+    "volatility_contraction_breakout": (
+        "vcb_range_lookback",
+        "vcb_breakout_lookback",
+    ),
+}
+FACTOR_CONTROL_DEFAULTS: dict[str, str | int | float] = {
+    "gap_entry_mode": "strict_break",
+    "gap_pct": 2.0,
+    "max_gap_filter_pct": 9.9,
+    "trend_breakout_lookback": 20,
+    "vcb_range_lookback": 7,
+    "vcb_breakout_lookback": 20,
+}
+SCAN_AXIS_STATE_KEYS = (
+    ("scan_axis_1_field", "scan_axis_1_values"),
+    ("scan_axis_2_field", "scan_axis_2_values"),
+)
 SUMMARY_COLUMN_LABELS = {
     "date": "开仓日期",
     "signal_count": "信号数",
@@ -198,6 +228,35 @@ def form_submit_button_stretch(label: str) -> bool:
 def clear_result_state() -> None:
     for key in RESULT_STATE_KEYS:
         st.session_state.pop(key, None)
+
+
+def factor_control_default(field_name: str) -> Any:
+    return FACTOR_CONTROL_DEFAULTS[field_name]
+
+
+def reset_inactive_factor_controls(active_factor: str) -> None:
+    for factor_name, widget_keys in FACTOR_SPECIFIC_WIDGET_KEYS.items():
+        if factor_name == active_factor:
+            continue
+        for widget_key in widget_keys:
+            st.session_state[widget_key] = factor_control_default(widget_key)
+
+
+def build_factor_scan_field_options(active_factor: str) -> list[str]:
+    eligible_fields = FACTOR_SCAN_ELIGIBLE_FIELDS.get(active_factor, frozenset())
+    ordered_fields = [
+        field_name for field_name in SCAN_FIELD_CASTERS if field_name in eligible_fields
+    ]
+    return [""] + ordered_fields
+
+
+def reset_invalid_scan_axis_state(scan_field_options: list[str]) -> None:
+    valid_fields = set(scan_field_options)
+    for field_key, values_key in SCAN_AXIS_STATE_KEYS:
+        current_field = str(st.session_state.get(field_key, ""))
+        if current_field not in valid_fields:
+            st.session_state[field_key] = ""
+            st.session_state[values_key] = ""
 
 
 def build_data_format_table() -> pd.DataFrame:
@@ -572,6 +631,15 @@ def build_scan_column_config() -> dict[str, object]:
         "最大高开/低开过滤": st.column_config.TextColumn(
             "最大高开/低开过滤", width="small"
         ),
+        "趋势突破回看天数": st.column_config.TextColumn(
+            "趋势突破回看天数", width="small"
+        ),
+        "波动收缩区间回看天数": st.column_config.TextColumn(
+            "波动收缩区间回看天数", width="small"
+        ),
+        "波动收缩突破回看天数": st.column_config.TextColumn(
+            "波动收缩突破回看天数", width="small"
+        ),
         "最多持有天数": st.column_config.TextColumn("最多持有天数", width="small"),
         "策略胜率": st.column_config.TextColumn("策略胜率", width="small"),
         "总收益率": st.column_config.TextColumn("总收益率", width="small"),
@@ -812,24 +880,110 @@ with st.expander("⚙️ 核心交易规则配置", expanded=True):
     core_entry_col, core_exit_col = st.columns(2)
     with core_entry_col:
         st.markdown("**信号与入场**")
-        st.caption("定义跳空方向、阈值与入场过滤条件。")
-        entry_top_cols = st.columns([1, 1.6])
-        direction_label = entry_top_cols[0].selectbox(
-            "交易方向", options=["向上跳空", "向下跳空"], key="direction_label"
-        )
-        gap_entry_mode = entry_top_cols[1].selectbox(
-            "开仓模式",
-            options=list(GAP_ENTRY_MODES),
-            format_func=lambda value: (
-                "严格突破前高/前低" if value == "strict_break" else "开盘相对昨收达阈值"
+        entry_factor = st.selectbox(
+            "入场因子",
+            options=list(ENTRY_FACTORS),
+            format_func=lambda value: str(
+                ENTRY_FACTOR_LABELS.get(value, value) or value
             ),
+            key="entry_factor",
         )
-        gap_cols = st.columns(2)
-        gap_pct = gap_cols[0].number_input(
-            "跳空幅度（%）", min_value=0.0, value=2.0, step=0.1
+        reset_inactive_factor_controls(str(entry_factor))
+        if entry_factor == "gap":
+            st.caption("保留原有跳空参数布局，只显示 gap 相关阈值。")
+            entry_top_cols = st.columns([1, 1.6])
+            direction_label = entry_top_cols[0].selectbox(
+                "交易方向", options=["向上跳空", "向下跳空"], key="direction_label"
+            )
+            entry_top_cols[1].selectbox(
+                "开仓模式",
+                options=list(GAP_ENTRY_MODES),
+                format_func=lambda value: (
+                    "严格突破前高/前低"
+                    if value == "strict_break"
+                    else "开盘相对昨收达阈值"
+                ),
+                key="gap_entry_mode",
+            )
+            gap_cols = st.columns(2)
+            gap_cols[0].number_input(
+                "跳空幅度（%）",
+                min_value=0.0,
+                value=float(factor_control_default("gap_pct")),
+                step=0.1,
+                key="gap_pct",
+            )
+            gap_cols[1].number_input(
+                "最大高开/低开过滤（%）",
+                min_value=0.0,
+                value=float(factor_control_default("max_gap_filter_pct")),
+                step=0.1,
+                key="max_gap_filter_pct",
+            )
+        elif entry_factor == "trend_breakout":
+            st.caption("趋势突破仅保留方向与回看窗口，避免混入 gap 专属控件。")
+            direction_label = st.selectbox(
+                "交易方向", options=["向上跳空", "向下跳空"], key="direction_label"
+            )
+            st.number_input(
+                "趋势突破回看天数",
+                min_value=1,
+                value=int(factor_control_default("trend_breakout_lookback")),
+                step=1,
+                key="trend_breakout_lookback",
+            )
+        else:
+            st.caption("波动收缩突破仅显示收缩/突破窗口，保持核心区紧凑。")
+            direction_label = st.selectbox(
+                "交易方向", options=["向上跳空", "向下跳空"], key="direction_label"
+            )
+            vcb_cols = st.columns(2)
+            vcb_cols[0].number_input(
+                "收缩区间回看天数",
+                min_value=1,
+                value=int(factor_control_default("vcb_range_lookback")),
+                step=1,
+                key="vcb_range_lookback",
+            )
+            vcb_cols[1].number_input(
+                "突破回看天数",
+                min_value=1,
+                value=int(factor_control_default("vcb_breakout_lookback")),
+                step=1,
+                key="vcb_breakout_lookback",
+            )
+
+        gap_entry_mode = str(
+            st.session_state.get(
+                "gap_entry_mode", factor_control_default("gap_entry_mode")
+            )
         )
-        max_gap_filter_pct = gap_cols[1].number_input(
-            "最大高开/低开过滤（%）", min_value=0.0, value=9.9, step=0.1
+        gap_pct = float(
+            st.session_state.get("gap_pct", factor_control_default("gap_pct"))
+        )
+        max_gap_filter_pct = float(
+            st.session_state.get(
+                "max_gap_filter_pct",
+                factor_control_default("max_gap_filter_pct"),
+            )
+        )
+        trend_breakout_lookback = int(
+            st.session_state.get(
+                "trend_breakout_lookback",
+                factor_control_default("trend_breakout_lookback"),
+            )
+        )
+        vcb_range_lookback = int(
+            st.session_state.get(
+                "vcb_range_lookback",
+                factor_control_default("vcb_range_lookback"),
+            )
+        )
+        vcb_breakout_lookback = int(
+            st.session_state.get(
+                "vcb_breakout_lookback",
+                factor_control_default("vcb_breakout_lookback"),
+            )
         )
         use_ma_filter = st.checkbox("启用快慢线开单过滤", value=False)
         ma_filter_cols = st.columns(2)
@@ -1011,6 +1165,8 @@ with st.expander("🛠️ 分批止盈高级配置", expanded=False):
 
 with st.expander("🔎 参数敏感性扫描", expanded=False):
     st.caption("适合做参数边界探索；建议先用少量组合验证，再扩大扫描范围。")
+    scan_field_options = build_factor_scan_field_options(str(entry_factor))
+    reset_invalid_scan_axis_state(scan_field_options)
     scan_top_cols = st.columns([1.6, 1])
     with scan_top_cols[0]:
         scan_enabled = st.checkbox("启用参数扫描", value=False)
@@ -1031,7 +1187,6 @@ with st.expander("🔎 参数敏感性扫描", expanded=False):
             step=1,
             disabled=not scan_enabled,
         )
-    scan_field_options = [""] + list(SCAN_FIELD_CASTERS.keys())
     scan_axis_cols = st.columns(2)
     with scan_axis_cols[0]:
         scan_axis_1 = st.selectbox(
@@ -1043,12 +1198,14 @@ with st.expander("🔎 参数敏感性扫描", expanded=False):
                 else (SCAN_FIELD_LABELS.get(value, value) or value)
             ),
             disabled=not scan_enabled,
+            key="scan_axis_1_field",
         )
         scan_axis_1_values = st.text_input(
             "维度 1 取值",
             value="",
             disabled=not scan_enabled,
             help="使用逗号分隔，例如 2,3,4",
+            key="scan_axis_1_values",
         )
     with scan_axis_cols[1]:
         scan_axis_2 = st.selectbox(
@@ -1060,12 +1217,14 @@ with st.expander("🔎 参数敏感性扫描", expanded=False):
                 else (SCAN_FIELD_LABELS.get(value, value) or value)
             ),
             disabled=not scan_enabled,
+            key="scan_axis_2_field",
         )
         scan_axis_2_values = st.text_input(
             "维度 2 取值",
             value="",
             disabled=not scan_enabled,
             help="留空表示只扫描一维",
+            key="scan_axis_2_values",
         )
 
 # 字段映射
@@ -1126,9 +1285,13 @@ if submitted:
         end_date=end_date.strftime("%Y-%m-%d"),
         stock_codes=normalize_stock_codes(stock_scope_text),
         gap_direction="up" if direction_label == "向上跳空" else "down",
+        entry_factor=str(entry_factor),
         gap_entry_mode=str(gap_entry_mode),
         gap_pct=float(gap_pct),
         max_gap_filter_pct=float(max_gap_filter_pct),
+        trend_breakout_lookback=int(trend_breakout_lookback),
+        vcb_range_lookback=int(vcb_range_lookback),
+        vcb_breakout_lookback=int(vcb_breakout_lookback),
         use_ma_filter=bool(use_ma_filter),
         fast_ma_period=int(fast_ma_period),
         slow_ma_period=int(slow_ma_period),

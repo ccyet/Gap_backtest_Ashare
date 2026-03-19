@@ -4,6 +4,7 @@ from dataclasses import dataclass, field, replace
 
 
 GAP_ENTRY_MODES = ("strict_break", "open_vs_prev_close_threshold")
+ENTRY_FACTORS = ("gap", "trend_breakout", "volatility_contraction_breakout")
 SCAN_METRICS = (
     "signal_count",
     "closed_trade_candidates",
@@ -19,6 +20,9 @@ SCAN_METRICS = (
 SCAN_FIELD_CASTERS: dict[str, type[int] | type[float]] = {
     "gap_pct": float,
     "max_gap_filter_pct": float,
+    "trend_breakout_lookback": int,
+    "vcb_range_lookback": int,
+    "vcb_breakout_lookback": int,
     "time_stop_days": int,
     "time_stop_target_pct": float,
     "stop_loss_pct": float,
@@ -27,6 +31,49 @@ SCAN_FIELD_CASTERS: dict[str, type[int] | type[float]] = {
     "exit_ma_period": int,
     "buy_slippage_pct": float,
     "sell_slippage_pct": float,
+}
+FACTOR_SCAN_ELIGIBLE_FIELDS: dict[str, frozenset[str]] = {
+    "gap": frozenset(
+        {
+            "gap_pct",
+            "max_gap_filter_pct",
+            "time_stop_days",
+            "time_stop_target_pct",
+            "stop_loss_pct",
+            "take_profit_pct",
+            "profit_drawdown_pct",
+            "exit_ma_period",
+            "buy_slippage_pct",
+            "sell_slippage_pct",
+        }
+    ),
+    "trend_breakout": frozenset(
+        {
+            "trend_breakout_lookback",
+            "time_stop_days",
+            "time_stop_target_pct",
+            "stop_loss_pct",
+            "take_profit_pct",
+            "profit_drawdown_pct",
+            "exit_ma_period",
+            "buy_slippage_pct",
+            "sell_slippage_pct",
+        }
+    ),
+    "volatility_contraction_breakout": frozenset(
+        {
+            "vcb_range_lookback",
+            "vcb_breakout_lookback",
+            "time_stop_days",
+            "time_stop_target_pct",
+            "stop_loss_pct",
+            "take_profit_pct",
+            "profit_drawdown_pct",
+            "exit_ma_period",
+            "buy_slippage_pct",
+            "sell_slippage_pct",
+        }
+    ),
 }
 
 
@@ -132,7 +179,11 @@ class AnalysisParams:
     buy_cost_pct: float
     sell_cost_pct: float
     time_exit_mode: str
+    entry_factor: str = "gap"
     gap_entry_mode: str = "strict_break"
+    trend_breakout_lookback: int = 20
+    vcb_range_lookback: int = 7
+    vcb_breakout_lookback: int = 20
     buy_slippage_pct: float = 0.0
     sell_slippage_pct: float = 0.0
     local_data_root: str = "data/market/daily"
@@ -190,6 +241,13 @@ class AnalysisParams:
             ]
             if partial_ma_periods:
                 lookback = max(lookback, max(partial_ma_periods) + 5)
+        if self.entry_factor == "trend_breakout":
+            lookback = max(lookback, self.trend_breakout_lookback + 5)
+        if self.entry_factor == "volatility_contraction_breakout":
+            lookback = max(
+                lookback,
+                max(self.vcb_range_lookback, self.vcb_breakout_lookback) + 5,
+            )
         return lookback
 
     @property
@@ -255,8 +313,14 @@ def validate_params(params: AnalysisParams) -> tuple[list[str], list[str]]:
     if params.time_exit_mode not in {"strict", "force_close"}:
         errors.append("时间到期处理方式不合法。")
 
-    if params.gap_entry_mode not in GAP_ENTRY_MODES:
-        errors.append("开仓信号模式不合法。")
+    if params.entry_factor not in ENTRY_FACTORS:
+        errors.append("入场因子不合法。")
+
+    if params.entry_factor == "gap":
+        if params.gap_entry_mode not in GAP_ENTRY_MODES:
+            errors.append("开仓信号模式不合法。")
+    elif params.gap_entry_mode != "strict_break":
+        errors.append("entry_factor 非 gap 时，不支持设置 gap_entry_mode。")
 
     if params.adjust not in {"qfq", "hfq"}:
         errors.append("复权方式只能为 qfq 或 hfq。")
@@ -269,6 +333,15 @@ def validate_params(params: AnalysisParams) -> tuple[list[str], list[str]]:
 
     if params.time_stop_days < 1:
         errors.append("最多持有天数必须大于等于 1。")
+
+    if params.trend_breakout_lookback < 1:
+        errors.append("trend_breakout_lookback 必须大于等于 1。")
+
+    if params.vcb_range_lookback < 1:
+        errors.append("vcb_range_lookback 必须大于等于 1。")
+
+    if params.vcb_breakout_lookback < 1:
+        errors.append("vcb_breakout_lookback 必须大于等于 1。")
 
     if params.stop_loss_pct < 0:
         errors.append("止损比例不能为负数。")
@@ -394,8 +467,14 @@ def validate_params(params: AnalysisParams) -> tuple[list[str], list[str]]:
         for axis in scan_config.axes:
             if axis.field_name not in SCAN_FIELD_CASTERS:
                 errors.append(f"参数扫描字段不支持：{axis.field_name}")
+                continue
             if not axis.values:
                 errors.append(f"参数扫描字段 {axis.field_name} 必须提供至少一个值。")
+            eligible_fields = FACTOR_SCAN_ELIGIBLE_FIELDS.get(params.entry_factor)
+            if eligible_fields is not None and axis.field_name not in eligible_fields:
+                errors.append(
+                    f"entry_factor={params.entry_factor} 不支持扫描字段：{axis.field_name}"
+                )
         if scan_config.metric not in SCAN_METRICS:
             errors.append("参数扫描排序指标不合法。")
         if scan_config.max_combinations < 1:

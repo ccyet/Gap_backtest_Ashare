@@ -1,204 +1,199 @@
-# Gap_test（A股跳空回测）
+# Gap_test（A 股日线策略研究回测）
 
-一个基于 **Streamlit + Pandas** 的 A 股跳空策略回测工具。
-
-当前项目重点支持：
-- **离线数据更新**（AKShare 仅用于下载，回测层不直接依赖）
-- **本地 Parquet 数据源**
-- **单账户单持仓回测**
-- **分批止盈（2~3 批）与 fill 级别交易明细**
+一个基于 **Streamlit + Pandas** 的 A 股日线研究型回测工作台。  
+项目定位是：**离线可复现、语义明确、方便做参数研究**，而不是高频撮合级仿真。
 
 ---
 
-## 1. 项目定位与核心原则
+## 1. 目前支持的核心能力
 
-### 1.1 定位
-本工具用于在指定时间区间内：
-1. 扫描“向上/向下跳空”信号；
-2. 按统一规则模拟买卖；
-3. 输出交易明细、日统计、净值曲线及可导出结果。
-
-### 1.2 核心原则（非常重要）
-- **数据下载与回测解耦**：
-  - `akshare` 只在数据提供层/更新脚本中出现；
-  - 回测核心（策略规则、分析汇总）不直接调用 akshare。
-- **统一标准代码**：股票代码统一为 `000001.SZ` / `600519.SH` 这类带后缀格式。
-- **本地优先**：回测读取本地标准化数据，不依赖在线接口实时可用性。
+- **离线行情更新**（AKShare 仅用于下载层，回测核心不直接依赖）
+- **多数据源回测输入**：本地 Parquet / SQLite / 上传 Excel/CSV
+- **单账户单持仓回测框架**（研究型 long/short 镜像）
+- **三类入场因子**
+  - `gap`（跳空）
+  - `trend_breakout`（趋势突破）
+  - `volatility_contraction_breakout`（波动收缩突破）
+- **退出风控体系**
+  - 全仓止损
+  - 分批退出（2~3 批，按优先级）
+  - 旧版整笔退出（仅在未启用分批时）
+  - 时间退出（strict / force_close）
+- **交易成本与滑点**
+- **参数敏感性扫描**（最多 2 维，组合上限可控）
+- **结果导出**（明细 / 日汇总 / 净值 / 扫描结果）
 
 ---
 
-## 2. 快速开始
+## 2. 关键执行语义（务必先看）
 
-## 2.1 安装依赖
+### 2.1 严禁未来函数（No Lookahead）
+
+所有入场触发依据都使用 **T-1 及更早**数据构建；T 日只用于判定是否触发成交。
+
+### 2.2 三类入场因子
+
+#### A) `gap`（兼容原行为）
+
+- `strict_break`
+  - long: `open > prev_high * (1 + gap_ratio)`
+  - short: `open < prev_low * (1 - gap_ratio)`
+- `open_vs_prev_close_threshold`
+  - long: `gap_pct_vs_prev_close >= gap_pct`
+  - short: `gap_pct_vs_prev_close <= -gap_pct`
+
+> 默认仍是 `entry_factor="gap"`，保持老配置可直接运行。
+
+#### B) `trend_breakout`
+
+- 基于过去窗口（不含当日）的高/低点生成突破触发价
+- long 触发价：`rolling_max(high.shift(1), lookback)`
+- short 触发价：`rolling_min(low.shift(1), lookback)`
+
+#### C) `volatility_contraction_breakout`
+
+- 先做收缩门槛：`prior_range = high.shift(1) - low.shift(1)`
+- 收缩成立：`prior_range == rolling_min(prior_range, vcb_range_lookback)`
+- 再结合突破触发价（同样使用 shift(1) 窗口）
+
+### 2.3 突破类成交模型（更贴近实际）
+
+突破类（`trend_breakout` / `volatility_contraction_breakout`）采用 stop-entry：
+
+- **long**
+  1. `open >= trigger` → 按 `open` 成交
+  2. `open < trigger <= high` → 按 `trigger` 成交
+  3. 否则不成交（`entry_not_filled`）
+- **short**（镜像）
+  1. `open <= trigger` → 按 `open` 成交
+  2. `open > trigger >= low` → 按 `trigger` 成交
+  3. 否则不成交
+
+成交价再叠加买卖滑点。
+
+### 2.4 不可成交过滤
+
+突破类额外过滤：
+
+- `volume <= 0` 或缺失
+- 一字价条（`open == high == low == close`）
+
+满足上述情形会记为 `locked_bar_unfillable` 并跳过。
+
+### 2.5 开仓当日不退出
+
+退出检查从持有第 1 天开始（`holding_days >= 1`），避免日线下不可判定的日内先后顺序歧义。
+
+---
+
+## 3. 参数扫描设计（研究友好 + 可控）
+
+### 3.1 固定规则
+
+- 扫描维度：**1~2 维**
+- 字段类型：**仅数值字段**
+- 组合方式：笛卡尔积
+- 组合上限：`max_combinations`
+
+### 3.2 因子感知扫描字段
+
+扫描字段会按当前 `entry_factor` 动态约束，避免无效组合。
+
+- `gap`：可扫 `gap_pct` / `max_gap_filter_pct` 及公共风险参数
+- `trend_breakout`：可扫 `trend_breakout_lookback` 及公共风险参数
+- `volatility_contraction_breakout`：可扫 `vcb_range_lookback` / `vcb_breakout_lookback` 及公共风险参数
+
+### 3.3 结果保留策略
+
+- 扫描表保留全组合统计
+- 明细/日汇总/净值仅保留最优组合 payload
+
+---
+
+## 4. 项目结构（核心模块）
+
+```text
+app.py            # Streamlit 界面与参数组装
+models.py         # 参数模型、扫描配置、参数校验
+rules.py          # 入场筛选、成交模拟、退出语义
+analyzer.py       # 候选交易、策略交易、净值与扫描汇总
+exporter.py       # Excel 导出
+
+scripts/update_data.py
+data/providers/akshare_provider.py
+data/services/local_data_service.py
+```
+
+---
+
+## 5. 数据流
+
+### 5.1 离线更新流
+
+1. UI 或 CLI 调用 `scripts/update_data.py`
+2. `data/providers/akshare_provider.py` 拉取日线
+3. 清洗标准化后落地 parquet
+4. 更新日志到 `data/market/metadata/update_log.parquet`
+
+### 5.2 回测流
+
+1. UI 提交参数
+2. `models.py` 构建并校验 `AnalysisParams`
+3. `analyzer.py -> rules.py` 执行信号筛选和交易模拟
+4. 输出明细、日统计、净值、扫描结果并可导出
+
+---
+
+## 6. 快速开始
+
+### 6.1 安装依赖
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## 2.2 启动 Web 界面
+### 6.2 启动 Web
 
 ```bash
 streamlit run app.py
 ```
 
-启动后你可以：
-- 在页面上方“**本地行情更新（离线下载）**”面板更新本地数据；
-- 在“参数设置”里配置策略并直接回测。
-
----
-
-## 3. 数据流（建议先理解）
-
-### 3.1 离线更新流程
-1. UI 或命令行调用 `scripts/update_data.py`
-2. `data/providers/akshare_provider.py` 拉取日线
-   - 下载源优先级：**新浪 → 腾讯 → 东财**（逐级 fallback）
-3. 清洗并标准化（日期/数值/代码）
-4. 写入本地 parquet：
-   - `data/market/daily/{adjust}/{symbol}.parquet`
-5. 追加更新日志：
-   - `data/market/metadata/update_log.parquet`
-6.（可选）导出 Excel：
-   - `data/market/exports/{adjust}/{symbol}.xlsx`
-
-### 3.2 回测读取流程
-1. 页面参数提交
-2. 回测逻辑读取本地数据（及上传文件/SQLite 方式）
-3. `rules.py` 执行交易模拟
-4. `analyzer.py` 汇总结果并输出报表
-
----
-
-## 4. 目录结构（关键部分）
-
-```text
-config/
-  data_source.yaml                  # 数据源配置（local_parquet 等）
-
-data/
-  providers/
-    akshare_provider.py             # 仅此层封装 akshare
-  services/
-    local_data_service.py           # 本地 parquet 读取接口
-  market/
-    daily/{adjust}/{symbol}.parquet # 本地日线
-    metadata/
-      symbols.parquet               # 股票列表
-      update_log.parquet            # 更新日志
-    exports/{adjust}/{symbol}.xlsx  # 可选导出
-
-scripts/
-  update_data.py                    # 离线更新脚本
-
-app.py                              # Streamlit 页面
-rules.py                            # 单笔交易模拟与退出规则
-analyzer.py                         # 候选交易、策略交易、净值汇总
-models.py                           # 参数模型与校验
-```
-
----
-
-## 5. 配置说明
-
-`config/data_source.yaml`：
-
-```yaml
-data_source: local_parquet
-local_data_root: data/market/daily
-default_adjust: qfq
-```
-
-含义：
-- `data_source`：当前使用本地 parquet
-- `local_data_root`：本地行情根目录
-- `default_adjust`：默认复权（如 qfq）
-
----
-
-## 6. 离线更新用法
-
-## 6.1 在 Web 界面更新（推荐）
-在页面“本地行情更新（离线下载）”中填写：
-- 股票代码（可选）
-- 起止日期
-- 复权类型
-- 是否刷新股票列表
-- 是否导出 Excel
-
-然后点击“开始更新本地数据”。
-
-## 6.2 命令行更新
+### 6.3 命令行更新数据（可选）
 
 ```bash
 python scripts/update_data.py --start-date 2024-01-01 --end-date 2024-12-31 --adjust qfq
 ```
 
 常用参数：
-- `--symbols`：逗号分隔，如 `000001.SZ,600519.SH`
-- `--refresh-symbols`：先刷新 `symbols.parquet`
-- `--export-excel`：更新后额外导出 Excel
+
+- `--symbols 000001.SZ,600519.SH`
+- `--refresh-symbols`
+- `--export-excel`
 
 ---
 
-## 7. 回测规则概览
+## 7. 结果输出说明
 
-## 7.1 交易框架
-- 单账户、单持仓
-- 持仓期间不重复开仓
-- 平仓后才释放仓位
-- 支持 long / short 的研究型镜像回测；short 仅用于研究，不代表 A 股可直接实盘融券交易。
+默认输出：
 
-## 7.2 退出优先级（日内）
-1. 全仓止损
-2. 分批退出（按 `priority`）
-3. 旧版整笔退出（仅在未启用分批时）
-4. 时间退出（`holding_days >= N` 后持续检查）
-5. 数据结束处理（`strict` / `force_close`）
+1. 交易明细
+2. 按开仓日汇总
+3. 净值曲线
 
-## 7.3 分批止盈（partial exit）
-- 支持 2~3 批
-- 每批可独立配置：
-  - `weight_pct`（仓位比例）
-  - `mode`（`fixed_tp` / `ma_exit` / `profit_drawdown`）
-  - `priority`
-- 同一天可触发多批，按 priority 从小到大执行
-- 返回 fill 级别明细：`fills`、`fill_count`、`fill_detail_json`
+其中明细包含 fill 级别信息、以及新入场元数据：
 
-## 7.4 profit_drawdown 定义
-采用“**整笔交易总利润回撤**”而非单纯价格峰值回撤：
-- `realized_profit`：已成交批次锁定的累计利润
-- `unrealized_profit`：剩余仓位按当前价格估算的浮动利润
-- `total_profit_now = realized_profit + unrealized_profit`
-- `peak_total_profit`：持仓以来出现过的最高总利润
-- `profit_drawdown = (peak_total_profit - total_profit_now) / peak_total_profit`
+- `entry_factor`
+- `entry_trigger_price`
+- `entry_fill_type`
 
-触发条件：
-1. `peak_total_profit` 先达到最小激活浮盈门槛
-2. 总利润回撤比例达到阈值
+扫描统计中额外包含跳过原因计数：
 
-这意味着：
-- 第一批止盈后，后续批次的 `profit_drawdown` 会把已锁定利润一起纳入计算
-- 第二/第三批退出依据是“整笔交易总利润回撤”，不是“最高价回撤”
-- whole-position 与 partial `profit_drawdown` 现在使用同一套总利润语义
+- `skipped_entry_not_filled`
+- `skipped_locked_bar_unfillable`
 
 ---
 
-## 8. 结果输出
-
-主要输出三类：
-1. **交易明细**（每笔交易）
-2. **按开仓日汇总**（日统计）
-3. **净值曲线**
-
-其中交易明细包含：
-- `fills`（分批成交列表）
-- `fill_count`
-- `fill_detail_json`
-- 归一化加权 `sell_price`
-
----
-
-## 9. 测试
+## 8. 测试
 
 运行全部测试：
 
@@ -206,54 +201,36 @@ python scripts/update_data.py --start-date 2024-01-01 --end-date 2024-12-31 --ad
 pytest -q
 ```
 
-当前测试覆盖重点：
-- 分批退出与优先级
-- 总利润回撤（含先止盈再回撤的分批场景）
-- 时间退出行为
-- strict / force_close
-- 本地 parquet 读取
-- AKShare 源 fallback（新浪 → 腾讯 → 东财）
+本项目重点覆盖：
+
+- 入场因子与信号语义（含默认 gap 兼容）
+- 突破类 stop-entry 成交与不可成交过滤
+- 分批退出、总利润回撤、时间退出
+- 参数扫描边界与导出
 
 ---
 
-## 10. 常见问题
+## 9. 已知边界与使用建议
 
-### Q1：为什么更新会失败？
-常见是网络或代理问题。系统会自动按“新浪→腾讯→东财”递补，三源都失败时会在日志中输出合并错误信息。
-
-### Q2：为什么回测时看不到最新数据？
-请确认：
-- 更新脚本执行成功；
-- parquet 文件已写入 `data/market/daily/{adjust}`；
-- 回测日期范围包含已下载区间。
-
-### Q3：为什么代码必须带后缀？
-为了避免跨市场 6 位代码碰撞，项目统一使用 `xxxxxx.SZ/SH/BJ` 标准格式。
+- 当前为**日线研究工具**，不是逐笔撮合回测器。
+- short 方向仅用于研究镜像，不代表可直接实盘融券执行。
+- 一字板/锁死成交等仅能在日线层做保守近似过滤。
+- 建议优先做“粗扫→细扫”，避免一次性多轴爆炸。
 
 ---
 
-## 11. 开发提示
+## 10. 开发原则
 
-- 如果你要改下载逻辑，请只改 `data/providers/` 和 `scripts/update_data.py`。
-- 如果你要改策略逻辑，请集中在 `rules.py` / `analyzer.py` / `models.py`。
-- 任何情况下，都尽量保持“下载与回测解耦”。
-
+- 下载层与回测层解耦
+- 策略语义优先稳定（先保证可复现，再扩展）
+- 尽量通过参数扩展，不做无必要重写
 
 ---
 
-## 12. 主题配置（含暗色主题）
+如需新增因子，建议沿用当前 contract：
 
-本项目不在 `app.py` 内动态切主题。
-
-如需暗色主题，请在项目根目录新建：` .streamlit/config.toml `，示例：
-
-```toml
-[theme]
-base="dark"
-primaryColor="#4f8bf9"
-backgroundColor="#0e1117"
-secondaryBackgroundColor="#262730"
-textColor="#fafafa"
-```
-
-保存后重启 `streamlit run app.py` 生效。
+1. 触发价来源必须可证明不看未来
+2. 明确 stop-entry 成交规则
+3. 明确不可成交规则
+4. 加入因子感知扫描白名单
+5. 先补测试再放 UI

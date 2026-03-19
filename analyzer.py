@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from itertools import product
 import json
+from typing import Any, cast
 
 import pandas as pd
 
@@ -36,6 +37,9 @@ BASE_DETAIL_COLUMNS = [
     "fills",
     "fill_count",
     "fill_detail_json",
+    "entry_factor",
+    "entry_trigger_price",
+    "entry_fill_type",
 ]
 
 DETAIL_COLUMNS = BASE_DETAIL_COLUMNS + [
@@ -87,6 +91,8 @@ def _empty_scan_stats() -> dict[str, int]:
         "skipped_insufficient_future": 0,
         "skipped_unclosed_trade": 0,
         "skipped_no_exit": 0,
+        "skipped_entry_not_filled": 0,
+        "skipped_locked_bar_unfillable": 0,
     }
 
 
@@ -112,12 +118,12 @@ def scan_trade_candidates(
     all_data: pd.DataFrame, params: AnalysisParams
 ) -> tuple[pd.DataFrame, dict[str, int]]:
     if all_data.empty:
-        return pd.DataFrame(columns=BASE_DETAIL_COLUMNS), _empty_scan_stats()
+        return pd.DataFrame(columns=pd.Index(BASE_DETAIL_COLUMNS)), _empty_scan_stats()
 
     start_ts = pd.to_datetime(params.start_date)
     end_ts = pd.to_datetime(params.end_date)
 
-    detail_records: list[dict] = []
+    detail_records: list[dict[str, Any]] = []
     stats = Counter()
 
     for _, stock_df in all_data.groupby("stock_code", sort=True):
@@ -136,6 +142,10 @@ def scan_trade_candidates(
                     stats["skipped_insufficient_future"] += 1
                 elif skip_reason == "unclosed_trade":
                     stats["skipped_unclosed_trade"] += 1
+                elif skip_reason == "entry_not_filled":
+                    stats["skipped_entry_not_filled"] += 1
+                elif skip_reason == "locked_bar_unfillable":
+                    stats["skipped_locked_bar_unfillable"] += 1
                 else:
                     stats["skipped_no_exit"] += 1
                 continue
@@ -159,7 +169,7 @@ def scan_trade_candidates(
             detail_records.append(trade)
             stats["closed_trade_candidates"] += 1
 
-    detail_df = pd.DataFrame(detail_records, columns=BASE_DETAIL_COLUMNS)
+    detail_df = pd.DataFrame(detail_records, columns=pd.Index(BASE_DETAIL_COLUMNS))
     if detail_df.empty:
         return detail_df, {**_empty_scan_stats(), **dict(stats)}
 
@@ -173,10 +183,10 @@ def build_strategy_trades(
     candidate_df: pd.DataFrame,
 ) -> tuple[pd.DataFrame, dict[str, float]]:
     if candidate_df.empty:
-        return pd.DataFrame(columns=DETAIL_COLUMNS), _empty_strategy_stats()
+        return pd.DataFrame(columns=pd.Index(DETAIL_COLUMNS)), _empty_strategy_stats()
 
-    strategy_records: list[dict] = []
-    stats = Counter()
+    strategy_records: list[dict[str, Any]] = []
+    stats = _empty_strategy_stats()
     last_sell_date: pd.Timestamp | None = None
     current_nav = 1.0
     trade_no = 0
@@ -211,9 +221,9 @@ def build_strategy_trades(
         last_sell_date = sell_date
         stats["executed_trades"] += 1
 
-    strategy_df = pd.DataFrame(strategy_records, columns=DETAIL_COLUMNS)
+    strategy_df = pd.DataFrame(strategy_records, columns=pd.Index(DETAIL_COLUMNS))
     if strategy_df.empty:
-        return strategy_df, {**_empty_strategy_stats(), **dict(stats)}
+        return strategy_df, stats
 
     stats["win_count"] = int(strategy_df["win_flag"].sum())
     stats["lose_count"] = int(len(strategy_df) - stats["win_count"])
@@ -231,7 +241,7 @@ def build_strategy_trades(
         strategy_df["net_return_pct"].std(ddof=0)
     )
 
-    return strategy_df, {**_empty_strategy_stats(), **dict(stats)}
+    return strategy_df, stats
 
 
 def build_equity_curve(
@@ -261,7 +271,7 @@ def build_equity_curve(
                 "event": "",
             }
         )
-        return equity_df[EQUITY_COLUMNS]
+        return equity_df.loc[:, EQUITY_COLUMNS]
 
     last_exit_ts = pd.to_datetime(strategy_df["sell_date"]).max()
     curve_end = max(end_ts, last_exit_ts)
@@ -278,12 +288,14 @@ def build_equity_curve(
 
     close_lookup: dict[tuple[str, pd.Timestamp], float] = {}
     if not all_data.empty:
-        for row in (
-            all_data[["stock_code", "date", "close"]].dropna().itertuples(index=False)
-        ):
-            close_lookup[(str(row.stock_code), pd.Timestamp(row.date).normalize())] = (
-                float(row.close)
-            )
+        rows = (
+            all_data[["stock_code", "date", "close"]]
+            .dropna()
+            .itertuples(index=False, name=None)
+        )
+        for stock_code, date_value, close_value in rows:
+            normalized_date = cast(pd.Timestamp, pd.Timestamp(date_value)).normalize()
+            close_lookup[(str(stock_code), normalized_date)] = float(close_value)
 
     trades = strategy_df.sort_values("date").to_dict("records")
     trade_index = 0
@@ -302,14 +314,14 @@ def build_equity_curve(
     }
 
     for market_date in market_dates:
-        current_date = pd.Timestamp(market_date).normalize()
+        current_date = cast(pd.Timestamp, pd.Timestamp(market_date)).normalize()
         event_label = ""
         event_trade_no = pd.NA
         event_stock_code = ""
 
         if active_trade is None and trade_index < len(trades):
             next_trade = trades[trade_index]
-            buy_date = pd.Timestamp(next_trade["date"]).normalize()
+            buy_date = cast(pd.Timestamp, pd.Timestamp(next_trade["date"])).normalize()
             if current_date >= buy_date:
                 active_trade = next_trade
                 active_last_close = None
@@ -325,7 +337,9 @@ def build_equity_curve(
             stock_code = str(active_trade["stock_code"])
             buy_price = float(active_trade["buy_price"])
             nav_before_trade = float(active_trade["nav_before_trade"])
-            sell_date = pd.Timestamp(active_trade["sell_date"]).normalize()
+            sell_date = cast(
+                pd.Timestamp, pd.Timestamp(active_trade["sell_date"])
+            ).normalize()
 
             day_close = close_lookup.get((stock_code, current_date), active_last_close)
             if day_close is not None:
@@ -334,7 +348,9 @@ def build_equity_curve(
             # 按 fill 顺序处理当日成交
             while trade_state["fill_idx"] < len(trade_state["fills"]):
                 fill = trade_state["fills"][trade_state["fill_idx"]]
-                fill_date = pd.to_datetime(fill["sell_date"]).normalize()
+                fill_date = cast(
+                    pd.Timestamp, pd.Timestamp(fill["sell_date"])
+                ).normalize()
                 if fill_date != current_date:
                     break
                 fill_weight = float(fill["weight"])
@@ -383,12 +399,13 @@ def build_equity_curve(
         )
 
     equity_df = pd.DataFrame(
-        curve_records, columns=["date", "net_value", "trade_no", "stock_code", "event"]
+        curve_records,
+        columns=pd.Index(["date", "net_value", "trade_no", "stock_code", "event"]),
     )
     equity_df["drawdown_pct"] = (
         equity_df["net_value"] / equity_df["net_value"].cummax() - 1.0
     ) * 100.0
-    return equity_df[EQUITY_COLUMNS]
+    return equity_df.loc[:, EQUITY_COLUMNS]
 
 
 def analyze_all_stocks(
@@ -496,30 +513,27 @@ def run_parameter_scan(
         + ["rank"]
     )
     detail_df, daily_df, equity_df, stats, overrides = best_payload
-    return scan_df[ordered_columns], detail_df, daily_df, equity_df, stats, overrides
+    ordered_scan_df = scan_df.loc[:, ordered_columns].copy()
+    return ordered_scan_df, detail_df, daily_df, equity_df, stats, overrides
 
 
 def build_daily_summary(detail_df: pd.DataFrame) -> pd.DataFrame:
     if detail_df.empty:
-        return pd.DataFrame(columns=DAILY_COLUMNS)
+        return pd.DataFrame(columns=pd.Index(DAILY_COLUMNS))
 
-    daily_df = (
-        detail_df.groupby("date", as_index=False)
-        .agg(
-            sample_count=("stock_code", "size"),
-            win_count=("win_flag", "sum"),
-            avg_net_return_pct=("net_return_pct", "mean"),
-            median_net_return_pct=("net_return_pct", "median"),
-            avg_holding_days=("holding_days", "mean"),
-        )
-        .sort_values("date")
-        .reset_index(drop=True)
+    grouped = detail_df.groupby("date", as_index=False).agg(
+        sample_count=("stock_code", "size"),
+        win_count=("win_flag", "sum"),
+        avg_net_return_pct=("net_return_pct", "mean"),
+        median_net_return_pct=("net_return_pct", "median"),
+        avg_holding_days=("holding_days", "mean"),
     )
+    daily_df = pd.DataFrame(grouped).sort_values(by="date").reset_index(drop=True)
 
     daily_df["lose_count"] = daily_df["sample_count"] - daily_df["win_count"]
     daily_df["win_rate_pct"] = daily_df["win_count"] / daily_df["sample_count"] * 100.0
 
-    ordered = daily_df[DAILY_COLUMNS].copy()
+    ordered = daily_df.loc[:, DAILY_COLUMNS].copy()
     ordered["sample_count"] = ordered["sample_count"].astype(int)
     ordered["win_count"] = ordered["win_count"].astype(int)
     ordered["lose_count"] = ordered["lose_count"].astype(int)

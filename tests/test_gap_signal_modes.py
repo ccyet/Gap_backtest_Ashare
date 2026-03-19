@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pandas as pd
 
 from models import AnalysisParams
 from rules import apply_gap_filters
 
 
-def make_params(**overrides: object) -> AnalysisParams:
-    base: dict[str, object] = {
+def make_params(**overrides: Any) -> AnalysisParams:
+    base: dict[str, Any] = {
         "data_source_type": "local_parquet",
         "db_path": "",
         "table_name": None,
@@ -42,6 +44,16 @@ def make_params(**overrides: object) -> AnalysisParams:
         "sell_slippage_pct": 0.0,
         "time_exit_mode": "strict",
     }
+    supported_fields = set(AnalysisParams.__dataclass_fields__)
+    optional_rollout_defaults = {
+        "entry_factor": "gap",
+        "trend_breakout_lookback": 2,
+        "vcb_range_lookback": 2,
+        "vcb_breakout_lookback": 2,
+    }
+    for field_name, field_value in optional_rollout_defaults.items():
+        if field_name in supported_fields:
+            base[field_name] = field_value
     base.update(overrides)
     return AnalysisParams(**base)
 
