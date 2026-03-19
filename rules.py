@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import asdict
-from typing import Any
+from typing import Any, cast
 
 import pandas as pd
 
@@ -21,27 +21,113 @@ SIGNAL_COLUMNS = [
     "gap_pct_vs_prev_close",
 ]
 
+BREAKOUT_ENTRY_FACTORS = frozenset(
+    {"trend_breakout", "volatility_contraction_breakout"}
+)
+
+
+def _column(stock_df: pd.DataFrame, column_name: str) -> pd.Series:
+    return cast(pd.Series, stock_df[column_name])
+
+
+def _is_missing_scalar(value: object) -> bool:
+    return bool(pd.isna(cast(Any, value)))
+
+
+def _compute_breakout_trigger_price(
+    stock_df: pd.DataFrame, params: AnalysisParams
+) -> pd.Series:
+    if params.entry_factor == "trend_breakout":
+        lookback = params.trend_breakout_lookback
+    else:
+        lookback = params.vcb_breakout_lookback
+
+    if params.gap_direction == "down":
+        return pd.Series(
+            _column(stock_df, "low").shift(1).rolling(lookback).min(),
+            index=stock_df.index,
+        )
+    return pd.Series(
+        _column(stock_df, "high").shift(1).rolling(lookback).max(),
+        index=stock_df.index,
+    )
+
+
+def _resolve_entry_execution(
+    signal_row: pd.Series,
+    params: AnalysisParams,
+    direction: str,
+) -> tuple[float | None, float, str | None, str | None, str]:
+    entry_factor = str(signal_row.get("entry_factor", params.entry_factor))
+    if entry_factor not in BREAKOUT_ENTRY_FACTORS:
+        return float(signal_row["open"]), math.nan, "open", None, entry_factor
+
+    trigger_price_raw = signal_row["entry_trigger_price"]
+    trigger_price = (
+        math.nan if _is_missing_scalar(trigger_price_raw) else float(trigger_price_raw)
+    )
+    if pd.isna(trigger_price):
+        return None, math.nan, None, "entry_not_filled", entry_factor
+
+    day_open = float(signal_row["open"])
+    day_high = float(signal_row["high"])
+    day_low = float(signal_row["low"])
+    day_close = float(signal_row["close"])
+
+    reference_buy_price: float | None = None
+    entry_fill_type: str | None = None
+    if direction == "short":
+        if day_open <= trigger_price:
+            reference_buy_price = day_open
+            entry_fill_type = "open"
+        elif day_open > trigger_price >= day_low:
+            reference_buy_price = trigger_price
+            entry_fill_type = "trigger"
+    else:
+        if day_open >= trigger_price:
+            reference_buy_price = day_open
+            entry_fill_type = "open"
+        elif day_open < trigger_price <= day_high:
+            reference_buy_price = trigger_price
+            entry_fill_type = "trigger"
+
+    if reference_buy_price is None or entry_fill_type is None:
+        return None, trigger_price, None, "entry_not_filled", entry_factor
+
+    volume = signal_row["volume"] if "volume" in signal_row else math.nan
+    is_one_price_bar = day_open == day_high == day_low == day_close
+    if _is_missing_scalar(volume) or float(volume) <= 0.0 or is_one_price_bar:
+        return None, trigger_price, None, "locked_bar_unfillable", entry_factor
+
+    return reference_buy_price, trigger_price, entry_fill_type, None, entry_factor
+
 
 def apply_gap_filters(df: pd.DataFrame, params: AnalysisParams) -> pd.DataFrame:
     stock_df = df.sort_values("date").reset_index(drop=True).copy()
 
-    stock_df["prev_close"] = stock_df["close"].shift(1)
-    stock_df["prev_high"] = stock_df["high"].shift(1)
-    stock_df["prev_low"] = stock_df["low"].shift(1)
+    stock_df["prev_close"] = _column(stock_df, "close").shift(1)
+    stock_df["prev_high"] = _column(stock_df, "high").shift(1)
+    stock_df["prev_low"] = _column(stock_df, "low").shift(1)
     stock_df["gap_pct_vs_prev_close"] = (
         stock_df["open"] / stock_df["prev_close"] - 1.0
     ) * 100.0
 
     if params.use_ma_filter:
-        stock_df["fast_ma"] = (
-            stock_df["close"].rolling(params.fast_ma_period).mean().shift(1)
-        )
-        stock_df["slow_ma"] = (
-            stock_df["close"].rolling(params.slow_ma_period).mean().shift(1)
-        )
+        stock_df["fast_ma"] = pd.Series(
+            _column(stock_df, "close").rolling(params.fast_ma_period).mean(),
+            index=stock_df.index,
+        ).shift(1)
+        stock_df["slow_ma"] = pd.Series(
+            _column(stock_df, "close").rolling(params.slow_ma_period).mean(),
+            index=stock_df.index,
+        ).shift(1)
     else:
         stock_df["fast_ma"] = math.nan
         stock_df["slow_ma"] = math.nan
+
+    stock_df["entry_factor"] = params.entry_factor
+    stock_df["entry_trigger_price"] = math.nan
+    stock_df["is_contraction"] = False
 
     signal_mask = (
         stock_df["prev_close"].notna()
@@ -49,30 +135,55 @@ def apply_gap_filters(df: pd.DataFrame, params: AnalysisParams) -> pd.DataFrame:
         & stock_df["prev_low"].notna()
     )
 
-    if params.gap_direction == "up":
-        if params.gap_entry_mode == "open_vs_prev_close_threshold":
-            signal_mask &= stock_df["gap_pct_vs_prev_close"] >= params.gap_pct
-        else:
-            signal_mask &= stock_df["open"] > stock_df["prev_high"] * (
-                1.0 + params.gap_ratio
+    if params.entry_factor == "gap":
+        if params.gap_direction == "up":
+            if params.gap_entry_mode == "open_vs_prev_close_threshold":
+                signal_mask &= stock_df["gap_pct_vs_prev_close"] >= params.gap_pct
+            else:
+                signal_mask &= stock_df["open"] > stock_df["prev_high"] * (
+                    1.0 + params.gap_ratio
+                )
+            signal_mask &= (
+                stock_df["gap_pct_vs_prev_close"] <= params.max_gap_filter_pct
             )
-        signal_mask &= stock_df["gap_pct_vs_prev_close"] <= params.max_gap_filter_pct
-        if params.use_ma_filter:
-            signal_mask &= stock_df["fast_ma"].notna() & stock_df["slow_ma"].notna()
-            signal_mask &= stock_df["open"] > stock_df["fast_ma"]
-            signal_mask &= stock_df["open"] > stock_df["slow_ma"]
+            if params.use_ma_filter:
+                signal_mask &= stock_df["fast_ma"].notna() & stock_df["slow_ma"].notna()
+                signal_mask &= stock_df["open"] > stock_df["fast_ma"]
+                signal_mask &= stock_df["open"] > stock_df["slow_ma"]
+        else:
+            if params.gap_entry_mode == "open_vs_prev_close_threshold":
+                signal_mask &= stock_df["gap_pct_vs_prev_close"] <= -params.gap_pct
+            else:
+                signal_mask &= stock_df["open"] < stock_df["prev_low"] * (
+                    1.0 - params.gap_ratio
+                )
+            signal_mask &= (
+                stock_df["gap_pct_vs_prev_close"] >= -params.max_gap_filter_pct
+            )
+            if params.use_ma_filter:
+                signal_mask &= stock_df["fast_ma"].notna() & stock_df["slow_ma"].notna()
+                signal_mask &= stock_df["open"] < stock_df["fast_ma"]
+                signal_mask &= stock_df["open"] < stock_df["slow_ma"]
     else:
-        if params.gap_entry_mode == "open_vs_prev_close_threshold":
-            signal_mask &= stock_df["gap_pct_vs_prev_close"] <= -params.gap_pct
-        else:
-            signal_mask &= stock_df["open"] < stock_df["prev_low"] * (
-                1.0 - params.gap_ratio
-            )
-        signal_mask &= stock_df["gap_pct_vs_prev_close"] >= -params.max_gap_filter_pct
+        stock_df["entry_trigger_price"] = _compute_breakout_trigger_price(
+            stock_df, params
+        )
+        if params.entry_factor == "volatility_contraction_breakout":
+            prior_range = _column(stock_df, "high").shift(1) - _column(
+                stock_df, "low"
+            ).shift(1)
+            contraction_floor = prior_range.rolling(params.vcb_range_lookback).min()
+            stock_df["is_contraction"] = prior_range.eq(contraction_floor)
+            signal_mask &= stock_df["is_contraction"]
+        signal_mask &= stock_df["entry_trigger_price"].notna()
         if params.use_ma_filter:
             signal_mask &= stock_df["fast_ma"].notna() & stock_df["slow_ma"].notna()
-            signal_mask &= stock_df["open"] < stock_df["fast_ma"]
-            signal_mask &= stock_df["open"] < stock_df["slow_ma"]
+            if params.gap_direction == "down":
+                signal_mask &= stock_df["open"] < stock_df["fast_ma"]
+                signal_mask &= stock_df["open"] < stock_df["slow_ma"]
+            else:
+                signal_mask &= stock_df["open"] > stock_df["fast_ma"]
+                signal_mask &= stock_df["open"] > stock_df["slow_ma"]
 
     stock_df["is_signal"] = signal_mask
     return stock_df
@@ -86,7 +197,11 @@ def _build_partial_ma_series(
         for rule in rules
         if rule.mode == "ma_exit" and rule.ma_period is not None
     }
-    return {period: stock_df["close"].rolling(period).mean() for period in periods}
+    close_series = _column(stock_df, "close")
+    return {
+        period: pd.Series(close_series.rolling(period).mean(), index=stock_df.index)
+        for period in periods
+    }
 
 
 def _apply_entry_slippage(
@@ -221,7 +336,16 @@ def simulate_trade(
         return None, "insufficient_future"
 
     signal_row = stock_df.iloc[signal_idx]
-    reference_buy_price = float(signal_row["open"])
+    (
+        reference_buy_price,
+        entry_trigger_price,
+        entry_fill_type,
+        entry_skip_reason,
+        entry_factor,
+    ) = _resolve_entry_execution(signal_row, params, direction)
+    if reference_buy_price is None:
+        return None, entry_skip_reason
+
     buy_price = _apply_entry_slippage(reference_buy_price, params, direction)
     buy_date = pd.Timestamp(signal_row["date"])
 
@@ -236,7 +360,10 @@ def simulate_trade(
         else reference_buy_price * (1.0 + params.take_profit_ratio)
     )
     exit_ma_series = (
-        stock_df["close"].rolling(params.exit_ma_period).mean()
+        pd.Series(
+            _column(stock_df, "close").rolling(params.exit_ma_period).mean(),
+            index=stock_df.index,
+        )
         if params.enable_ma_exit
         else None
     )
@@ -567,4 +694,9 @@ def simulate_trade(
         "profit_drawdown_ratio": float(triggered_profit_drawdown_ratio) * 100.0
         if pd.notna(triggered_profit_drawdown_ratio)
         else math.nan,
+        "entry_factor": entry_factor,
+        "entry_trigger_price": float(entry_trigger_price)
+        if pd.notna(entry_trigger_price)
+        else math.nan,
+        "entry_fill_type": entry_fill_type,
     }, None
