@@ -165,12 +165,21 @@ python scripts/update_data.py --start-date 2024-01-01 --end-date 2024-12-31 --ad
 - 返回 fill 级别明细：`fills`、`fill_count`、`fill_detail_json`
 
 ## 7.4 profit_drawdown 定义
-采用“**价格峰值回撤**”而非利润回撤：
-- `peak_price`：持仓以来最高价（动态更新）
-- `price_drawdown = (peak_price - day_close) / peak_price`
-- 同时满足：
-  1. 到达最小激活浮盈门槛
-  2. 回撤比例达到阈值
+采用“**整笔交易总利润回撤**”而非单纯价格峰值回撤：
+- `realized_profit`：已成交批次锁定的累计利润
+- `unrealized_profit`：剩余仓位按当前价格估算的浮动利润
+- `total_profit_now = realized_profit + unrealized_profit`
+- `peak_total_profit`：持仓以来出现过的最高总利润
+- `profit_drawdown = (peak_total_profit - total_profit_now) / peak_total_profit`
+
+触发条件：
+1. `peak_total_profit` 先达到最小激活浮盈门槛
+2. 总利润回撤比例达到阈值
+
+这意味着：
+- 第一批止盈后，后续批次的 `profit_drawdown` 会把已锁定利润一起纳入计算
+- 第二/第三批退出依据是“整笔交易总利润回撤”，不是“最高价回撤”
+- whole-position 与 partial `profit_drawdown` 现在使用同一套总利润语义
 
 ---
 
@@ -199,6 +208,7 @@ pytest -q
 
 当前测试覆盖重点：
 - 分批退出与优先级
+- 总利润回撤（含先止盈再回撤的分批场景）
 - 时间退出行为
 - strict / force_close
 - 本地 parquet 读取

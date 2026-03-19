@@ -1,6 +1,33 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
+
+
+GAP_ENTRY_MODES = ("strict_break", "open_vs_prev_close_threshold")
+SCAN_METRICS = (
+    "signal_count",
+    "closed_trade_candidates",
+    "executed_trades",
+    "strategy_win_rate_pct",
+    "total_return_pct",
+    "max_drawdown_pct",
+    "final_net_value",
+    "avg_holding_days",
+    "profit_risk_ratio",
+    "trade_return_volatility_pct",
+)
+SCAN_FIELD_CASTERS: dict[str, type[int] | type[float]] = {
+    "gap_pct": float,
+    "max_gap_filter_pct": float,
+    "time_stop_days": int,
+    "time_stop_target_pct": float,
+    "stop_loss_pct": float,
+    "take_profit_pct": float,
+    "profit_drawdown_pct": float,
+    "exit_ma_period": int,
+    "buy_slippage_pct": float,
+    "sell_slippage_pct": float,
+}
 
 
 EPSILON = 1e-12
@@ -51,6 +78,29 @@ class TradeFill:
 
 
 @dataclass(frozen=True)
+class ParamScanAxis:
+    field_name: str
+    values: tuple[int | float, ...]
+
+
+@dataclass(frozen=True)
+class ParamScanConfig:
+    enabled: bool = False
+    axes: tuple[ParamScanAxis, ...] = ()
+    metric: str = "total_return_pct"
+    max_combinations: int = 25
+
+    @property
+    def combination_count(self) -> int:
+        if not self.enabled or not self.axes:
+            return 0
+        total = 1
+        for axis in self.axes:
+            total *= len(axis.values)
+        return total
+
+
+@dataclass(frozen=True)
 class AnalysisParams:
     data_source_type: str
     db_path: str
@@ -82,8 +132,12 @@ class AnalysisParams:
     buy_cost_pct: float
     sell_cost_pct: float
     time_exit_mode: str
+    gap_entry_mode: str = "strict_break"
+    buy_slippage_pct: float = 0.0
+    sell_slippage_pct: float = 0.0
     local_data_root: str = "data/market/daily"
     adjust: str = "qfq"
+    scan_config: ParamScanConfig = field(default_factory=ParamScanConfig)
 
     @property
     def gap_ratio(self) -> float:
@@ -114,6 +168,14 @@ class AnalysisParams:
         return self.sell_cost_pct / 100.0
 
     @property
+    def buy_slippage_ratio(self) -> float:
+        return self.buy_slippage_pct / 100.0
+
+    @property
+    def sell_slippage_ratio(self) -> float:
+        return self.sell_slippage_pct / 100.0
+
+    @property
     def required_lookback_days(self) -> int:
         lookback = 5
         if self.use_ma_filter:
@@ -121,7 +183,11 @@ class AnalysisParams:
         if self.enable_ma_exit:
             lookback = max(lookback, self.exit_ma_period + 5)
         if self.partial_exit_enabled:
-            partial_ma_periods = [rule.ma_period for rule in self.partial_exit_rules if rule.enabled and rule.ma_period is not None]
+            partial_ma_periods = [
+                rule.ma_period
+                for rule in self.partial_exit_rules
+                if rule.enabled and rule.ma_period is not None
+            ]
             if partial_ma_periods:
                 lookback = max(lookback, max(partial_ma_periods) + 5)
         return lookback
@@ -146,6 +212,33 @@ def normalize_column_overrides(raw_values: dict[str, str]) -> dict[str, str]:
     return {key: value.strip() for key, value in raw_values.items() if value.strip()}
 
 
+def parse_scan_values(field_name: str, raw_text: str) -> tuple[int | float, ...]:
+    caster = SCAN_FIELD_CASTERS[field_name]
+    if not raw_text.strip():
+        return ()
+    normalized = raw_text
+    for separator in ["，", "\n", "\t", " "]:
+        normalized = normalized.replace(separator, ",")
+    values: list[int | float] = []
+    for chunk in normalized.split(","):
+        text = chunk.strip()
+        if not text:
+            continue
+        number = float(text)
+        values.append(int(number) if caster is int else number)
+    return tuple(values)
+
+
+def apply_scan_overrides(
+    params: AnalysisParams, overrides: dict[str, int | float]
+) -> AnalysisParams:
+    normalized: dict[str, int | float] = {}
+    for field_name, value in overrides.items():
+        caster = SCAN_FIELD_CASTERS[field_name]
+        normalized[field_name] = int(value) if caster is int else float(value)
+    return replace(params, **normalized)
+
+
 def validate_params(params: AnalysisParams) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     warnings: list[str] = []
@@ -161,6 +254,9 @@ def validate_params(params: AnalysisParams) -> tuple[list[str], list[str]]:
 
     if params.time_exit_mode not in {"strict", "force_close"}:
         errors.append("时间到期处理方式不合法。")
+
+    if params.gap_entry_mode not in GAP_ENTRY_MODES:
+        errors.append("开仓信号模式不合法。")
 
     if params.adjust not in {"qfq", "hfq"}:
         errors.append("复权方式只能为 qfq 或 hfq。")
@@ -235,7 +331,10 @@ def validate_params(params: AnalysisParams) -> tuple[list[str], list[str]]:
                 elif rule.drawdown_pct < 0:
                     errors.append(f"第 {index} 批回撤比例不能为负数。")
 
-                if rule.min_profit_to_activate_drawdown is not None and rule.min_profit_to_activate_drawdown < 0:
+                if (
+                    rule.min_profit_to_activate_drawdown is not None
+                    and rule.min_profit_to_activate_drawdown < 0
+                ):
                     errors.append(f"第 {index} 批最小浮盈激活门槛不能为负数。")
 
     if params.time_stop_days < 1:
@@ -247,11 +346,16 @@ def validate_params(params: AnalysisParams) -> tuple[list[str], list[str]]:
     if params.buy_cost_pct < 0 or params.sell_cost_pct < 0:
         errors.append("买入成本和卖出成本都不能为负数。")
 
+    if params.buy_slippage_pct < 0 or params.sell_slippage_pct < 0:
+        errors.append("买入滑点和卖出滑点都不能为负数。")
+
     if params.use_ma_filter:
         if params.fast_ma_period < 1 or params.slow_ma_period < 1:
             errors.append("均线周期必须大于等于 1。")
         if params.fast_ma_period > params.slow_ma_period:
-            warnings.append("快线周期大于慢线周期是允许的，但请确认这符合您的研究习惯。")
+            warnings.append(
+                "快线周期大于慢线周期是允许的，但请确认这符合您的研究习惯。"
+            )
 
     for canonical, label in (
         ("date", "日期列名"),
@@ -262,7 +366,10 @@ def validate_params(params: AnalysisParams) -> tuple[list[str], list[str]]:
         ("close", "收盘价列名"),
         ("volume", "成交量列名"),
     ):
-        if canonical in params.column_overrides and not params.column_overrides[canonical].strip():
+        if (
+            canonical in params.column_overrides
+            and not params.column_overrides[canonical].strip()
+        ):
             errors.append(f"{label}不能为空。")
 
     if params.stop_loss_pct >= 100:
@@ -276,5 +383,24 @@ def validate_params(params: AnalysisParams) -> tuple[list[str], list[str]]:
 
     if params.start_date > params.end_date:
         errors.append("开始日期不能晚于结束日期。")
+
+    scan_config = params.scan_config
+    if scan_config.enabled:
+        if not (1 <= len(scan_config.axes) <= 2):
+            errors.append("参数扫描当前只支持 1 到 2 个扫描维度。")
+        field_names = [axis.field_name for axis in scan_config.axes]
+        if len(field_names) != len(set(field_names)):
+            errors.append("参数扫描字段不能重复。")
+        for axis in scan_config.axes:
+            if axis.field_name not in SCAN_FIELD_CASTERS:
+                errors.append(f"参数扫描字段不支持：{axis.field_name}")
+            if not axis.values:
+                errors.append(f"参数扫描字段 {axis.field_name} 必须提供至少一个值。")
+        if scan_config.metric not in SCAN_METRICS:
+            errors.append("参数扫描排序指标不合法。")
+        if scan_config.max_combinations < 1:
+            errors.append("参数扫描最大组合数必须大于等于 1。")
+        if scan_config.combination_count > scan_config.max_combinations:
+            errors.append("参数扫描组合数超出上限，请减少扫描值数量。")
 
     return errors, warnings
