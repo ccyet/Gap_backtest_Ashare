@@ -105,14 +105,64 @@ def _apply_exit_slippage(
     return reference_price * (1.0 - params.sell_slippage_ratio)
 
 
+def _position_profit_ratio(
+    reference_entry_price: float, mark_price: float, direction: str
+) -> float:
+    if direction == "short":
+        return (reference_entry_price - mark_price) / reference_entry_price
+    return mark_price / reference_entry_price - 1.0
+
+
+def _total_trade_profit_ratio(
+    realized_profit_ratio: float,
+    remaining_weight: float,
+    reference_entry_price: float,
+    mark_price: float,
+    direction: str,
+) -> float:
+    return realized_profit_ratio + remaining_weight * _position_profit_ratio(
+        reference_entry_price, mark_price, direction
+    )
+
+
+def _update_peak_total_profit_ratio(
+    peak_total_profit_ratio: float,
+    realized_profit_ratio: float,
+    remaining_weight: float,
+    reference_entry_price: float,
+    favorable_price: float,
+    direction: str,
+) -> float:
+    candidate_peak = _total_trade_profit_ratio(
+        realized_profit_ratio,
+        remaining_weight,
+        reference_entry_price,
+        favorable_price,
+        direction,
+    )
+    return max(peak_total_profit_ratio, candidate_peak)
+
+
+def _compute_profit_drawdown_ratio(
+    peak_total_profit_ratio: float,
+    current_total_profit_ratio: float,
+) -> float:
+    if peak_total_profit_ratio <= EPSILON:
+        return math.nan
+    return (
+        peak_total_profit_ratio - current_total_profit_ratio
+    ) / peak_total_profit_ratio
+
+
 def _rule_triggered(
     rule: PartialExitRule,
     day_row: pd.Series,
     buy_price: float,
-    trail_extreme: float,
     ma_series: dict[int, pd.Series],
     day_idx: int,
     direction: str,
+    peak_total_profit_ratio: float,
+    current_total_profit_ratio: float,
 ) -> bool:
     day_close = float(day_row["close"])
     day_high = float(day_row["high"])
@@ -141,31 +191,19 @@ def _rule_triggered(
         )
 
     if rule.mode == "profit_drawdown":
-        if rule.drawdown_ratio is None:
+        if (
+            rule.drawdown_ratio is None
+            or rule.min_profit_to_activate_drawdown_ratio is None
+        ):
             return False
-
-        if direction == "short":
-            activation_price = buy_price * (
-                1.0 - rule.min_profit_to_activate_drawdown_ratio
-            )
-            if trail_extreme > activation_price:
-                return False
-            max_profit_pct = (buy_price - trail_extreme) / buy_price
-            current_profit_pct = (buy_price - day_close) / buy_price
-            if max_profit_pct <= EPSILON:
-                return False
-            profit_drawdown = (max_profit_pct - current_profit_pct) / max_profit_pct
-            return profit_drawdown >= rule.drawdown_ratio
-
-        activation_price = buy_price * (
-            1.0 + rule.min_profit_to_activate_drawdown_ratio
+        if peak_total_profit_ratio < rule.min_profit_to_activate_drawdown_ratio:
+            return False
+        profit_drawdown = _compute_profit_drawdown_ratio(
+            peak_total_profit_ratio, current_total_profit_ratio
         )
-        if trail_extreme < activation_price:
+        if pd.isna(profit_drawdown):
             return False
-        if trail_extreme <= EPSILON:
-            return False
-        price_drawdown = (trail_extreme - day_close) / trail_extreme
-        return price_drawdown >= rule.drawdown_ratio
+        return profit_drawdown >= rule.drawdown_ratio
 
     return False
 
@@ -206,7 +244,8 @@ def simulate_trade(
     fills: list[TradeFill] = []
     remaining_weight = 1.0
     max_holding_days = len(stock_df) - signal_idx - 1
-    trail_extreme = reference_buy_price  # long: peak high, short: min low
+    realized_trigger_profit_ratio = 0.0
+    peak_total_profit_ratio = 0.0
 
     partial_rules = (
         sorted(
@@ -231,12 +270,7 @@ def simulate_trade(
         day_close = float(day_row["close"])
         day_high = float(day_row["high"])
         day_low = float(day_row["low"])
-
-        trail_extreme = (
-            min(trail_extreme, day_low)
-            if direction == "short"
-            else max(trail_extreme, day_high)
-        )
+        favorable_price = day_low if direction == "short" else day_high
 
         # 1) 全仓止损
         stop_hit = (
@@ -262,14 +296,30 @@ def simulate_trade(
             for rule in partial_rules:
                 if rule.priority in triggered_rule_priority:
                     continue
+                current_peak_total_profit_ratio = _update_peak_total_profit_ratio(
+                    peak_total_profit_ratio,
+                    realized_trigger_profit_ratio,
+                    remaining_weight,
+                    reference_buy_price,
+                    favorable_price,
+                    direction,
+                )
+                current_total_profit_ratio = _total_trade_profit_ratio(
+                    realized_trigger_profit_ratio,
+                    remaining_weight,
+                    reference_buy_price,
+                    day_close,
+                    direction,
+                )
                 if not _rule_triggered(
                     rule,
                     day_row,
                     reference_buy_price,
-                    trail_extreme,
                     partial_ma_series,
                     day_idx,
                     direction,
+                    current_peak_total_profit_ratio,
+                    current_total_profit_ratio,
                 ):
                     continue
 
@@ -279,33 +329,23 @@ def simulate_trade(
                     continue
 
                 fill_price = _apply_exit_slippage(day_close, params, direction)
+                reference_fill_price = day_close
                 if rule.mode == "fixed_tp" and rule.target_profit_ratio is not None:
                     target_price = (
                         reference_buy_price * (1.0 - rule.target_profit_ratio)
                         if direction == "short"
                         else reference_buy_price * (1.0 + rule.target_profit_ratio)
                     )
+                    reference_fill_price = target_price
                     fill_price = _apply_exit_slippage(target_price, params, direction)
                 if rule.mode == "ma_exit" and rule.ma_period is not None:
                     ma_value = partial_ma_series[rule.ma_period].iloc[day_idx]
                     if pd.notna(ma_value):
                         triggered_exit_ma_value = float(ma_value)
                 if rule.mode == "profit_drawdown":
-                    if direction == "short":
-                        max_profit_pct = (
-                            reference_buy_price - trail_extreme
-                        ) / reference_buy_price
-                        current_profit_pct = (
-                            reference_buy_price - day_close
-                        ) / reference_buy_price
-                        if max_profit_pct > EPSILON:
-                            triggered_profit_drawdown_ratio = (
-                                max_profit_pct - current_profit_pct
-                            ) / max_profit_pct
-                    elif trail_extreme > EPSILON:
-                        triggered_profit_drawdown_ratio = (
-                            trail_extreme - day_close
-                        ) / trail_extreme
+                    triggered_profit_drawdown_ratio = _compute_profit_drawdown_ratio(
+                        current_peak_total_profit_ratio, current_total_profit_ratio
+                    )
 
                 fills.append(
                     TradeFill(
@@ -317,10 +357,29 @@ def simulate_trade(
                     )
                 )
                 remaining_weight -= rule_weight
+                realized_trigger_profit_ratio += rule_weight * _position_profit_ratio(
+                    reference_buy_price, reference_fill_price, direction
+                )
                 triggered_rule_priority.add(rule.priority)
+                peak_total_profit_ratio = _update_peak_total_profit_ratio(
+                    current_peak_total_profit_ratio,
+                    realized_trigger_profit_ratio,
+                    remaining_weight,
+                    reference_buy_price,
+                    favorable_price,
+                    direction,
+                )
                 if remaining_weight <= EPSILON:
                     remaining_weight = 0.0
                     break
+        peak_total_profit_ratio = _update_peak_total_profit_ratio(
+            peak_total_profit_ratio,
+            realized_trigger_profit_ratio,
+            remaining_weight,
+            reference_buy_price,
+            favorable_price,
+            direction,
+        )
 
         # 3) 旧版整笔退出
         if (not params.partial_exit_enabled) and remaining_weight > EPSILON:
@@ -342,34 +401,32 @@ def simulate_trade(
                 remaining_weight = 0.0
 
             if remaining_weight > EPSILON and params.enable_profit_drawdown_exit:
-                if direction == "short":
-                    max_profit_pct = (
-                        reference_buy_price - trail_extreme
-                    ) / reference_buy_price
-                    current_profit_pct = (
-                        reference_buy_price - day_close
-                    ) / reference_buy_price
-                else:
-                    max_profit_pct = (
-                        trail_extreme - reference_buy_price
-                    ) / reference_buy_price
-                    current_profit_pct = day_close / reference_buy_price - 1.0
-                if max_profit_pct > EPSILON:
-                    profit_drawdown_ratio = (
-                        max_profit_pct - current_profit_pct
-                    ) / max_profit_pct
-                    if profit_drawdown_ratio >= params.profit_drawdown_ratio:
-                        fills.append(
-                            TradeFill(
-                                str(day_date.date()),
-                                _apply_exit_slippage(day_close, params, direction),
-                                remaining_weight,
-                                "profit_drawdown_exit",
-                                holding_days,
-                            )
+                current_total_profit_ratio = _total_trade_profit_ratio(
+                    realized_trigger_profit_ratio,
+                    remaining_weight,
+                    reference_buy_price,
+                    day_close,
+                    direction,
+                )
+                profit_drawdown_ratio = _compute_profit_drawdown_ratio(
+                    peak_total_profit_ratio, current_total_profit_ratio
+                )
+                if (
+                    peak_total_profit_ratio > EPSILON
+                    and not pd.isna(profit_drawdown_ratio)
+                    and profit_drawdown_ratio >= params.profit_drawdown_ratio
+                ):
+                    fills.append(
+                        TradeFill(
+                            str(day_date.date()),
+                            _apply_exit_slippage(day_close, params, direction),
+                            remaining_weight,
+                            "profit_drawdown_exit",
+                            holding_days,
                         )
-                        triggered_profit_drawdown_ratio = profit_drawdown_ratio
-                        remaining_weight = 0.0
+                    )
+                    triggered_profit_drawdown_ratio = profit_drawdown_ratio
+                    remaining_weight = 0.0
 
             if (
                 remaining_weight > EPSILON

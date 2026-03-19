@@ -357,14 +357,14 @@ def test_partial_case_l_drawdown_uses_updated_trailing_peak():
         ),
         PartialExitRule(False, 0, "fixed_tp", 2, target_profit_pct=1.0),
     )
-    # buy=100, 峰值先到 110（若按旧峰值20%回撤阈值=88会误触发），后续新峰值到 120，
-    # 再回撤到 96（=120*(1-20%)）时才应触发。
+    # 新语义下看的是整笔利润回撤而非最高价回撤：
+    # buy=100, 峰值到120时峰值利润=20%，若利润回撤20%，则当前利润降到16%即触发。
     df = make_stock_df(
         [
             (100, 101, 99, 100),
-            (100, 110, 99, 100),
-            (100, 120, 99, 119),
-            (119, 119, 95, 96),
+            (100, 110, 99, 109),
+            (109, 120, 108, 119),
+            (119, 119, 115, 116),
         ]
     )
     trade, reason = simulate_trade(
@@ -383,7 +383,7 @@ def test_partial_case_l_drawdown_uses_updated_trailing_peak():
     assert reason is None
     assert trade["fills"][-1]["exit_type"] == "profit_drawdown"
     assert trade["fills"][-1]["holding_days"] == 3
-    assert trade["fills"][-1]["sell_price"] == 96
+    assert trade["fills"][-1]["sell_price"] == 116
 
 
 def test_short_stop_loss_mirror():
@@ -545,6 +545,122 @@ def test_slippage_does_not_change_whole_position_drawdown_trigger_timing():
         == slipped_trade["fills"][-1]["holding_days"]
         == 2
     )
+
+
+def test_partial_total_profit_drawdown_uses_locked_first_batch_profit():
+    rules = (
+        PartialExitRule(True, 50, "fixed_tp", 1, target_profit_pct=10.0),
+        PartialExitRule(
+            True,
+            50,
+            "profit_drawdown",
+            2,
+            drawdown_pct=50.0,
+            min_profit_to_activate_drawdown=8.0,
+        ),
+    )
+    df = make_stock_df(
+        [
+            (100, 101, 99, 100),
+            (100, 111, 99, 110),
+            (110, 111, 99, 100),
+        ]
+    )
+    trade, reason = simulate_trade(
+        df,
+        0,
+        make_params(
+            partial_exit_enabled=True,
+            partial_exit_count=2,
+            partial_exit_rules=rules,
+            enable_take_profit=False,
+            stop_loss_pct=50.0,
+            time_stop_days=2,
+            time_stop_target_pct=-50.0,
+        ),
+    )
+    assert reason is None
+    assert [fill["exit_type"] for fill in trade["fills"]] == [
+        "fixed_tp",
+        "profit_drawdown",
+    ]
+    assert abs(trade["fills"][0]["sell_price"] - 110.0) < 1e-12
+    assert trade["fills"][1]["sell_price"] == 100.0
+
+
+def test_total_profit_drawdown_can_trigger_when_peak_price_drawdown_would_not():
+    rules = (
+        PartialExitRule(
+            True,
+            100,
+            "profit_drawdown",
+            1,
+            drawdown_pct=20.0,
+            min_profit_to_activate_drawdown=5.0,
+        ),
+        PartialExitRule(False, 0, "fixed_tp", 2, target_profit_pct=1.0),
+    )
+    df = make_stock_df(
+        [
+            (100, 101, 99, 100),
+            (100, 150, 99, 149),
+            (149, 149, 134, 135),
+        ]
+    )
+    trade, reason = simulate_trade(
+        df,
+        0,
+        make_params(
+            partial_exit_enabled=True,
+            partial_exit_count=2,
+            partial_exit_rules=rules,
+            enable_take_profit=False,
+            stop_loss_pct=50.0,
+            time_stop_days=2,
+            time_stop_target_pct=-50.0,
+        ),
+    )
+    assert reason is None
+    assert trade["fills"][-1]["exit_type"] == "profit_drawdown"
+    assert trade["fills"][-1]["holding_days"] == 2
+    assert trade["fills"][-1]["sell_price"] == 135.0
+
+
+def test_total_profit_drawdown_activation_uses_total_trade_peak_profit():
+    rules = (
+        PartialExitRule(True, 50, "fixed_tp", 1, target_profit_pct=10.0),
+        PartialExitRule(
+            True,
+            50,
+            "profit_drawdown",
+            2,
+            drawdown_pct=20.0,
+            min_profit_to_activate_drawdown=12.0,
+        ),
+    )
+    df = make_stock_df(
+        [
+            (100, 101, 99, 100),
+            (100, 111, 99, 110),
+            (110, 111, 104, 105),
+        ]
+    )
+    trade, reason = simulate_trade(
+        df,
+        0,
+        make_params(
+            partial_exit_enabled=True,
+            partial_exit_count=2,
+            partial_exit_rules=rules,
+            enable_take_profit=False,
+            stop_loss_pct=50.0,
+            time_stop_days=2,
+            time_stop_target_pct=-50.0,
+            time_exit_mode="force_close",
+        ),
+    )
+    assert reason is None
+    assert [fill["exit_type"] for fill in trade["fills"]] == ["fixed_tp", "force_close"]
 
 
 def test_slippage_does_not_change_time_exit_trigger_timing():
